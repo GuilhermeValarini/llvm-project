@@ -156,6 +156,11 @@ int32_t __tgt_rtl_run_target_team_region_async(
 // error code.
 int32_t __tgt_rtl_synchronize(int32_t ID, __tgt_async_info *AsyncInfo);
 
+// Non-blocking version of __tgt_rtl_synchronize. Queries for completion of
+// asynchronous operations, marking the internal queue as nullptr when
+// completed.
+int32_t __tgt_rtl_synchronize_async(int32_t ID, __tgt_async_info *AsyncInfo);
+
 // Set plugin's internal information flag externally.
 void __tgt_rtl_set_info_flag(uint32_t);
 
