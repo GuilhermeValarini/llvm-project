@@ -5179,3 +5179,22 @@ void __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle) {
     taskdata->td_target_data.async_handle = handle;
   }
 }
+
+/*!
+@ingroup TASKING
+@param gtid Global Thread ID of current thread
+@return Returns true if the current thread of the given thread has a task team
+allocated to it.
+
+Checks if the current task has a task team.
+*/
+KMP_EXPORT bool __kmpc_omp_has_task_team(kmp_int32 gtid) {
+  kmp_info_t *thread = __kmp_thread_from_gtid(gtid);
+  kmp_taskdata_t *taskdata = thread->th.th_current_task;
+
+  if (taskdata) {
+    return taskdata->td_task_team != NULL;
+  }
+
+  return FALSE;
+}

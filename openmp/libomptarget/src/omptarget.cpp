@@ -22,15 +22,33 @@
 
 using llvm::SmallVector;
 
-int AsyncInfoTy::synchronize() {
+int AsyncInfoTy::synchronize(SyncType SyncType) {
   int Result = OFFLOAD_SUCCESS;
   if (AsyncInfo.Queue) {
-    // If we have a queue we need to synchronize it now.
-    Result = Device.synchronize(*this);
-    assert(AsyncInfo.Queue == nullptr &&
-           "The device plugin should have nulled the queue to indicate there "
-           "are no outstanding actions!");
+    switch (SyncType) {
+    case SyncType::BLOCKING:
+      // If we have a queue we need to synchronize it now.
+      Result = Device.synchronize(*this);
+      assert(AsyncInfo.Queue == nullptr &&
+             "The device plugin should have nulled the queue to indicate there "
+             "are no outstanding actions!");
+      break;
+    case SyncType::NON_BLOCKING:
+      Result = Device.synchronizeAsync(*this);
+      break;
+    }
   }
+
+  // Run any pending post-processing function registered on this async object.
+  if (Result == OFFLOAD_SUCCESS && isDone()) {
+    for (auto &PostProcFunc : PostProcessingFunctions) {
+      Result = PostProcFunc();
+      if (Result != OFFLOAD_SUCCESS)
+        break;
+    }
+    PostProcessingFunctions.clear();
+  }
+
   return Result;
 }
 
@@ -38,6 +56,8 @@ void *&AsyncInfoTy::getVoidPtrLocation() {
   BufferLocations.push_back(nullptr);
   return BufferLocations.back();
 }
+
+bool AsyncInfoTy::isDone() { return AsyncInfo.Queue == nullptr; }
 
 /* All begin addresses for partially mapped structs must be 8-aligned in order
  * to ensure proper alignment of members. E.g.
@@ -701,7 +721,7 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
                   void **ArgBases, void **Args, int64_t *ArgSizes,
                   int64_t *ArgTypes, map_var_info_t *ArgNames,
                   void **ArgMappers, AsyncInfoTy &AsyncInfo, bool FromMapper) {
-  int Ret;
+  int Ret = OFFLOAD_SUCCESS;
   SmallVector<PostProcessingInfo> PostProcessingPtrs;
   void *FromMapperBase = nullptr;
   // process each input.
@@ -861,75 +881,80 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
     }
   }
 
-  // TODO: We should not synchronize here but pass the AsyncInfo object to the
-  //       allocate/deallocate device APIs.
-  //
-  // We need to synchronize before deallocating data.
-  Ret = AsyncInfo.synchronize();
-  if (Ret != OFFLOAD_SUCCESS)
-    return OFFLOAD_FAIL;
+  // Add post-processing functions
+  AsyncInfo.addPostProcessingFunction(
+      [=, Device = &Device,
+       PostProcessingPtrs = std::move(PostProcessingPtrs)]() mutable -> int {
+        int Ret = OFFLOAD_SUCCESS;
 
-  // Deallocate target pointer
-  for (PostProcessingInfo &Info : PostProcessingPtrs) {
-    // If we marked the entry to be deleted we need to verify no other thread
-    // reused it by now. If deletion is still supposed to happen by this thread
-    // LR will be set and exclusive access to the HDTT map will avoid another
-    // thread reusing the entry now. Note that we do not request (exclusive)
-    // access to the HDTT map if Info.DelEntry is not set.
-    LookupResult LR;
-    DeviceTy::HDTTMapAccessorTy HDTTMap =
-        Device.HostDataToTargetMap.getExclusiveAccessor(!Info.DelEntry);
+        // Deallocate target pointer
+        for (PostProcessingInfo &Info : PostProcessingPtrs) {
+          // If we marked the entry to be deleted we need to verify no other
+          // thread reused it by now. If deletion is still supposed to happen by
+          // this thread LR will be set and exclusive access to the HDTT map
+          // will avoid another thread reusing the entry now. Note that we do
+          // not request (exclusive) access to the HDTT map if Info.DelEntry is
+          // not set.
+          LookupResult LR;
+          DeviceTy::HDTTMapAccessorTy HDTTMap =
+              Device->HostDataToTargetMap.getExclusiveAccessor(!Info.DelEntry);
 
-    if (Info.DelEntry) {
-      LR = Device.lookupMapping(HDTTMap, Info.HstPtrBegin, Info.DataSize);
-      if (LR.Entry->getTotalRefCount() != 0 ||
-          LR.Entry->getDeleteThreadId() != std::this_thread::get_id()) {
-        // The thread is not in charge of deletion anymore. Give up access to
-        // the HDTT map and unset the deletion flag.
-        HDTTMap.destroy();
-        Info.DelEntry = false;
-      }
-    }
+          if (Info.DelEntry) {
+            LR =
+                Device->lookupMapping(HDTTMap, Info.HstPtrBegin, Info.DataSize);
+            if (LR.Entry->getTotalRefCount() != 0 ||
+                LR.Entry->getDeleteThreadId() != std::this_thread::get_id()) {
+              // The thread is not in charge of deletion anymore. Give up access
+              // to the HDTT map and unset the deletion flag.
+              HDTTMap.destroy();
+              Info.DelEntry = false;
+            }
+          }
 
-    // If we copied back to the host a struct/array containing pointers, we
-    // need to restore the original host pointer values from their shadow
-    // copies. If the struct is going to be deallocated, remove any remaining
-    // shadow pointer entries for this struct.
-    auto CB = [&](ShadowPtrListTy::iterator &Itr) {
-      // If we copied the struct to the host, we need to restore the pointer.
-      if (Info.ArgType & OMP_TGT_MAPTYPE_FROM) {
-        void **ShadowHstPtrAddr = (void **)Itr->first;
-        *ShadowHstPtrAddr = Itr->second.HstPtrVal;
-        DP("Restoring original host pointer value " DPxMOD " for host "
-           "pointer " DPxMOD "\n",
-           DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
-      }
-      // If the struct is to be deallocated, remove the shadow entry.
-      if (Info.DelEntry) {
-        DP("Removing shadow pointer " DPxMOD "\n", DPxPTR((void **)Itr->first));
-        auto OldItr = Itr;
-        Itr++;
-        Device.ShadowPtrMap.erase(OldItr);
-      } else {
-        ++Itr;
-      }
-      return OFFLOAD_SUCCESS;
-    };
-    applyToShadowMapEntries(Device, CB, Info.HstPtrBegin, Info.DataSize,
-                            Info.TPR);
+          // If we copied back to the host a struct/array containing pointers,
+          // we need to restore the original host pointer values from their
+          // shadow copies. If the struct is going to be deallocated, remove any
+          // remaining shadow pointer entries for this struct.
+          auto CB = [&](ShadowPtrListTy::iterator &Itr) {
+            // If we copied the struct to the host, we need to restore the
+            // pointer.
+            if (Info.ArgType & OMP_TGT_MAPTYPE_FROM) {
+              void **ShadowHstPtrAddr = (void **)Itr->first;
+              *ShadowHstPtrAddr = Itr->second.HstPtrVal;
+              DP("Restoring original host pointer value " DPxMOD " for host "
+                 "pointer " DPxMOD "\n",
+                 DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
+            }
+            // If the struct is to be deallocated, remove the shadow entry.
+            if (Info.DelEntry) {
+              DP("Removing shadow pointer " DPxMOD "\n",
+                 DPxPTR((void **)Itr->first));
+              auto OldItr = Itr;
+              Itr++;
+              Device->ShadowPtrMap.erase(OldItr);
+            } else {
+              ++Itr;
+            }
+            return OFFLOAD_SUCCESS;
+          };
+          applyToShadowMapEntries(*Device, CB, Info.HstPtrBegin, Info.DataSize,
+                                  Info.TPR);
 
-    // If we are deleting the entry the DataMapMtx is locked and we own the
-    // entry.
-    if (Info.DelEntry) {
-      if (!FromMapperBase || FromMapperBase != Info.HstPtrBegin)
-        Ret = Device.deallocTgtPtr(HDTTMap, LR, Info.DataSize);
+          // If we are deleting the entry the DataMapMtx is locked and we own
+          // the entry.
+          if (Info.DelEntry) {
+            if (!FromMapperBase || FromMapperBase != Info.HstPtrBegin)
+              Ret = Device->deallocTgtPtr(HDTTMap, LR, Info.DataSize);
 
-      if (Ret != OFFLOAD_SUCCESS) {
-        REPORT("Deallocating data from device failed.\n");
-        break;
-      }
-    }
-  }
+            if (Ret != OFFLOAD_SUCCESS) {
+              REPORT("Deallocating data from device failed.\n");
+              break;
+            }
+          }
+        }
+
+        return Ret;
+      });
 
   return Ret;
 }
@@ -969,20 +994,22 @@ static int targetDataContiguous(ident_t *Loc, DeviceTy &Device, void *ArgsBase,
       return OFFLOAD_FAIL;
     }
 
-    auto CB = [&](ShadowPtrListTy::iterator &Itr) {
-      void **ShadowHstPtrAddr = (void **)Itr->first;
-      // Wait for device-to-host memcopies for whole struct to complete,
-      // before restoring the correct host pointer.
-      if (AsyncInfo.synchronize() != OFFLOAD_SUCCESS)
-        return OFFLOAD_FAIL;
-      *ShadowHstPtrAddr = Itr->second.HstPtrVal;
-      DP("Restoring original host pointer value " DPxMOD
-         " for host pointer " DPxMOD "\n",
-         DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
-      ++Itr;
+    // Wait for device-to-host memcopies for whole struct to complete,
+    // before restoring the correct host pointer.
+    AsyncInfo.addPostProcessingFunction([=, Device = &Device]() -> int {
+      auto CB = [&](ShadowPtrListTy::iterator &Itr) {
+        void **ShadowHstPtrAddr = (void **)Itr->first;
+        *ShadowHstPtrAddr = Itr->second.HstPtrVal;
+        DP("Restoring original host pointer value " DPxMOD
+           " for host pointer " DPxMOD "\n",
+           DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
+        ++Itr;
+        return OFFLOAD_SUCCESS;
+      };
+      applyToShadowMapEntries(*Device, CB, HstPtrBegin, ArgSize, TPR);
+
       return OFFLOAD_SUCCESS;
-    };
-    applyToShadowMapEntries(Device, CB, HstPtrBegin, ArgSize, TPR);
+    });
   }
 
   if (ArgType & OMP_TGT_MAPTYPE_TO) {
@@ -1159,19 +1186,19 @@ class PrivateArgumentManagerTy {
   /// first-private arguments and transfer them all at once.
   struct FirstPrivateArgInfoTy {
     /// The index of the element in \p TgtArgs corresponding to the argument
-    const int Index;
+    int Index;
     /// Host pointer begin
-    const char *HstPtrBegin;
+    char *HstPtrBegin;
     /// Host pointer end
-    const char *HstPtrEnd;
+    char *HstPtrEnd;
     /// Aligned size
-    const int64_t AlignedSize;
+    int64_t AlignedSize;
     /// Host pointer name
-    const map_var_info_t HstPtrName = nullptr;
+    map_var_info_t HstPtrName = nullptr;
 
-    FirstPrivateArgInfoTy(int Index, const void *HstPtr, int64_t Size,
+    FirstPrivateArgInfoTy(int Index, void *HstPtr, int64_t Size,
                           const map_var_info_t HstPtrName = nullptr)
-        : Index(Index), HstPtrBegin(reinterpret_cast<const char *>(HstPtr)),
+        : Index(Index), HstPtrBegin(reinterpret_cast<char *>(HstPtr)),
           HstPtrEnd(HstPtrBegin + Size), AlignedSize(Size + Size % Alignment),
           HstPtrName(HstPtrName) {}
   };
@@ -1473,12 +1500,17 @@ static int processDataAfter(ident_t *Loc, int64_t DeviceId, void *HostPtr,
     return OFFLOAD_FAIL;
   }
 
-  // Free target memory for private arguments
-  Ret = PrivateArgumentManager.free();
-  if (Ret != OFFLOAD_SUCCESS) {
-    REPORT("Failed to deallocate target memory for private args\n");
-    return OFFLOAD_FAIL;
-  }
+  // Free target memory for private arguments after synchronization.
+  AsyncInfo.addPostProcessingFunction(
+      [PrivateArgumentManager = 
+           std::move(PrivateArgumentManager)]() mutable -> int {
+        int Ret = PrivateArgumentManager.free();
+        if (Ret != OFFLOAD_SUCCESS) {
+          REPORT("Failed to deallocate target memory for private args\n");
+          return OFFLOAD_FAIL;
+        }
+        return Ret;
+      });
 
   return OFFLOAD_SUCCESS;
 }
@@ -1530,7 +1562,7 @@ int target(ident_t *Loc, DeviceTy &Device, void *HostPtr, int32_t ArgNum,
 
   PrivateArgumentManagerTy PrivateArgumentManager(Device, AsyncInfo);
 
-  int Ret;
+  int Ret = OFFLOAD_SUCCESS;
   if (ArgNum) {
     // Process data, such as data mapping, before launching the kernel
     Ret = processDataBefore(Loc, DeviceId, HostPtr, ArgNum, ArgBases, Args,

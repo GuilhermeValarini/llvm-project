@@ -117,6 +117,10 @@ void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32 gtid, kmp_int32 ndeps,
                           kmp_depend_info_t *dep_list, kmp_int32 ndeps_noalias,
                           kmp_depend_info_t *noalias_dep_list)
     __attribute__((weak));
+void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid) __attribute__((weak));
+void __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle)
+    __attribute__((weak));
+bool __kmpc_omp_has_task_team(kmp_int32 gtid) __attribute__((weak));
 #ifdef __cplusplus
 }
 #endif
@@ -186,6 +190,37 @@ printKernelArguments(const ident_t *Loc, const int64_t DeviceId,
 
     INFO(OMP_INFOTYPE_ALL, DeviceId, "%s(%s)[%" PRId64 "] %s\n", Type,
          getNameFromMapping(VarName).c_str(), ArgSizes[I], Implicit);
+  }
+}
+
+static inline AsyncInfoTy *acquireTaskAsyncInfo(int GTID, DeviceTy &Device,
+                                                bool &IsNew) {
+  auto *AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(GTID);
+  IsNew = false;
+
+  if (!AsyncInfo) {
+    AsyncInfo = new AsyncInfoTy(Device);
+    __kmpc_omp_set_target_async_handle(GTID, (void *)AsyncInfo);
+    IsNew = true;
+  }
+
+  return AsyncInfo;
+}
+
+static inline void completeTaskAsyncInfo(int GTID, AsyncInfoTy *AsyncInfo) {
+  if (AsyncInfo->isDone()) {
+    delete AsyncInfo;
+    __kmpc_omp_set_target_async_handle(GTID, NULL);
+  }
+}
+
+static inline AsyncInfoTy::SyncType getSyncTypeFromTask(int GTID) {
+  // Only tasks with an assigned task team can be re-enqueue and thus can use
+  // the non-blocking synchronization scheme.
+  if (__kmpc_omp_has_task_team(GTID)) {
+    return AsyncInfoTy::SyncType::NON_BLOCKING;
+  } else {
+    return AsyncInfoTy::SyncType::BLOCKING;
   }
 }
 

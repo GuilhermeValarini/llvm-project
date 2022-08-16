@@ -15,10 +15,14 @@
 #define _OMPTARGET_H_
 
 #include <deque>
+#include <functional>
 #include <stddef.h>
 #include <stdint.h>
+#include <type_traits>
 
 #include <SourceInfo.h>
+
+#include "llvm/ADT/SmallVector.h"
 
 #define OFFLOAD_SUCCESS (0)
 #define OFFLOAD_FAIL (~0)
@@ -185,10 +189,19 @@ class AsyncInfoTy {
   /// as long as this AsyncInfoTy object.
   std::deque<void *> BufferLocations;
 
+  /// Post-processing operations executed after a successful synchronization.
+  using PostProcFuncTy = std::function<int()>;
+  llvm::SmallVector<PostProcFuncTy> PostProcessingFunctions;
+
   __tgt_async_info AsyncInfo;
   DeviceTy &Device;
 
 public:
+  enum class SyncType {
+    BLOCKING,
+    NON_BLOCKING
+  };
+
   AsyncInfoTy(DeviceTy &Device) : Device(Device) {}
   ~AsyncInfoTy() { synchronize(); }
 
@@ -199,11 +212,22 @@ public:
   /// Synchronize all pending actions.
   ///
   /// \returns OFFLOAD_FAIL or OFFLOAD_SUCCESS appropriately.
-  int synchronize();
+  int synchronize(SyncType SyncType = SyncType::BLOCKING);
 
   /// Return a void* reference with a lifetime that is at least as long as this
   /// AsyncInfoTy object. The location can be used as intermediate buffer.
   void *&getVoidPtrLocation();
+
+  /// Returns if all asynchronous operations are completed.
+  bool isDone();
+
+  template<typename FuncTy>
+  void addPostProcessingFunction(FuncTy Function) {
+    static_assert(std::is_convertible_v<FuncTy, PostProcFuncTy>,
+                  "Invalid post-processing function type. Please check "
+                  "function signature!");
+    PostProcessingFunctions.emplace_back(Function);
+  }
 };
 
 /// This struct is a record of non-contiguous information
