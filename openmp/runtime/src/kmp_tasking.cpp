@@ -1137,9 +1137,9 @@ static void __kmp_task_finish(kmp_int32 gtid, kmp_task_t *task,
     KMP_DEBUG_ASSERT(taskdata->td_flags.executing == 1);
     taskdata->td_flags.executing = 0; // suspend the finishing task
 
-    // Decrement the counter of hidden helper tasks to be executed
+    // Decrement the counter of hidden helper tasks to be executed.
     if (taskdata->td_flags.hidden_helper) {
-      // Hidden helper tasks can only be executed by hidden helper threads
+      // Hidden helper tasks can only be executed by hidden helper threads.
       KMP_ASSERT(KMP_HIDDEN_HELPER_THREAD(gtid));
       KMP_ATOMIC_DEC(&__kmp_unexecuted_hidden_helper_tasks);
     }

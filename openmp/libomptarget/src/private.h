@@ -193,6 +193,9 @@ printKernelArguments(const ident_t *Loc, const int64_t DeviceId,
   }
 }
 
+/// Acquire the AsyncInfo stored in async handle of the current task being
+/// executed. If no valid aysnc handle is present, a new AsyncInfo is allocated
+/// and stored in the current task.
 static inline AsyncInfoTy *acquireTaskAsyncInfo(int GTID, DeviceTy &Device,
                                                 bool &IsNew) {
   auto *AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(GTID);
@@ -207,6 +210,8 @@ static inline AsyncInfoTy *acquireTaskAsyncInfo(int GTID, DeviceTy &Device,
   return AsyncInfo;
 }
 
+/// Delete AsyncInfo if it is completed and remove it from the current task
+/// async handle.
 static inline void completeTaskAsyncInfo(int GTID, AsyncInfoTy *AsyncInfo) {
   if (AsyncInfo->isDone()) {
     delete AsyncInfo;
@@ -214,9 +219,10 @@ static inline void completeTaskAsyncInfo(int GTID, AsyncInfoTy *AsyncInfo) {
   }
 }
 
+/// Define the synchronization type based on the current task context. Only
+/// tasks with an assigned task team can be re-enqueue and thus can use the
+/// non-blocking synchronization scheme.
 static inline AsyncInfoTy::SyncType getSyncTypeFromTask(int GTID) {
-  // Only tasks with an assigned task team can be re-enqueue and thus can use
-  // the non-blocking synchronization scheme.
   if (__kmpc_omp_has_task_team(GTID)) {
     return AsyncInfoTy::SyncType::NON_BLOCKING;
   } else {

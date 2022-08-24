@@ -716,6 +716,79 @@ static void applyToShadowMapEntries(DeviceTy &Device, CBTy CB, void *Begin,
 
 } // namespace
 
+static int
+postProcessingTargetDataEnd(DeviceTy *Device,
+                            SmallVector<PostProcessingInfo> PostProcessingPtrs,
+                            void * FromMapperBase) {
+  int Ret = OFFLOAD_SUCCESS;
+
+  // Deallocate target pointer
+  for (PostProcessingInfo &Info : PostProcessingPtrs) {
+    // If we marked the entry to be deleted we need to verify no other
+    // thread reused it by now. If deletion is still supposed to happen by
+    // this thread LR will be set and exclusive access to the HDTT map
+    // will avoid another thread reusing the entry now. Note that we do
+    // not request (exclusive) access to the HDTT map if Info.DelEntry is
+    // not set.
+    LookupResult LR;
+    DeviceTy::HDTTMapAccessorTy HDTTMap =
+        Device->HostDataToTargetMap.getExclusiveAccessor(!Info.DelEntry);
+
+    if (Info.DelEntry) {
+      LR = Device->lookupMapping(HDTTMap, Info.HstPtrBegin, Info.DataSize);
+      if (LR.Entry->getTotalRefCount() != 0 ||
+          LR.Entry->getDeleteThreadId() != std::this_thread::get_id()) {
+        // The thread is not in charge of deletion anymore. Give up access
+        // to the HDTT map and unset the deletion flag.
+        HDTTMap.destroy();
+        Info.DelEntry = false;
+      }
+    }
+
+    // If we copied back to the host a struct/array containing pointers,
+    // we need to restore the original host pointer values from their
+    // shadow copies. If the struct is going to be deallocated, remove any
+    // remaining shadow pointer entries for this struct.
+    auto CB = [&](ShadowPtrListTy::iterator &Itr) {
+      // If we copied the struct to the host, we need to restore the
+      // pointer.
+      if (Info.ArgType & OMP_TGT_MAPTYPE_FROM) {
+        void **ShadowHstPtrAddr = (void **)Itr->first;
+        *ShadowHstPtrAddr = Itr->second.HstPtrVal;
+        DP("Restoring original host pointer value " DPxMOD " for host "
+           "pointer " DPxMOD "\n",
+           DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
+      }
+      // If the struct is to be deallocated, remove the shadow entry.
+      if (Info.DelEntry) {
+        DP("Removing shadow pointer " DPxMOD "\n", DPxPTR((void **)Itr->first));
+        auto OldItr = Itr;
+        Itr++;
+        Device->ShadowPtrMap.erase(OldItr);
+      } else {
+        ++Itr;
+      }
+      return OFFLOAD_SUCCESS;
+    };
+    applyToShadowMapEntries(*Device, CB, Info.HstPtrBegin, Info.DataSize,
+                            Info.TPR);
+
+    // If we are deleting the entry the DataMapMtx is locked and we own
+    // the entry.
+    if (Info.DelEntry) {
+      if (!FromMapperBase || FromMapperBase != Info.HstPtrBegin)
+        Ret = Device->deallocTgtPtr(HDTTMap, LR, Info.DataSize);
+
+      if (Ret != OFFLOAD_SUCCESS) {
+        REPORT("Deallocating data from device failed.\n");
+        break;
+      }
+    }
+  }
+
+  return Ret;
+}
+
 /// Internal function to undo the mapping and retrieve the data from the device.
 int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
                   void **ArgBases, void **Args, int64_t *ArgSizes,
@@ -885,75 +958,8 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
   AsyncInfo.addPostProcessingFunction(
       [=, Device = &Device,
        PostProcessingPtrs = std::move(PostProcessingPtrs)]() mutable -> int {
-        int Ret = OFFLOAD_SUCCESS;
-
-        // Deallocate target pointer
-        for (PostProcessingInfo &Info : PostProcessingPtrs) {
-          // If we marked the entry to be deleted we need to verify no other
-          // thread reused it by now. If deletion is still supposed to happen by
-          // this thread LR will be set and exclusive access to the HDTT map
-          // will avoid another thread reusing the entry now. Note that we do
-          // not request (exclusive) access to the HDTT map if Info.DelEntry is
-          // not set.
-          LookupResult LR;
-          DeviceTy::HDTTMapAccessorTy HDTTMap =
-              Device->HostDataToTargetMap.getExclusiveAccessor(!Info.DelEntry);
-
-          if (Info.DelEntry) {
-            LR =
-                Device->lookupMapping(HDTTMap, Info.HstPtrBegin, Info.DataSize);
-            if (LR.Entry->getTotalRefCount() != 0 ||
-                LR.Entry->getDeleteThreadId() != std::this_thread::get_id()) {
-              // The thread is not in charge of deletion anymore. Give up access
-              // to the HDTT map and unset the deletion flag.
-              HDTTMap.destroy();
-              Info.DelEntry = false;
-            }
-          }
-
-          // If we copied back to the host a struct/array containing pointers,
-          // we need to restore the original host pointer values from their
-          // shadow copies. If the struct is going to be deallocated, remove any
-          // remaining shadow pointer entries for this struct.
-          auto CB = [&](ShadowPtrListTy::iterator &Itr) {
-            // If we copied the struct to the host, we need to restore the
-            // pointer.
-            if (Info.ArgType & OMP_TGT_MAPTYPE_FROM) {
-              void **ShadowHstPtrAddr = (void **)Itr->first;
-              *ShadowHstPtrAddr = Itr->second.HstPtrVal;
-              DP("Restoring original host pointer value " DPxMOD " for host "
-                 "pointer " DPxMOD "\n",
-                 DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
-            }
-            // If the struct is to be deallocated, remove the shadow entry.
-            if (Info.DelEntry) {
-              DP("Removing shadow pointer " DPxMOD "\n",
-                 DPxPTR((void **)Itr->first));
-              auto OldItr = Itr;
-              Itr++;
-              Device->ShadowPtrMap.erase(OldItr);
-            } else {
-              ++Itr;
-            }
-            return OFFLOAD_SUCCESS;
-          };
-          applyToShadowMapEntries(*Device, CB, Info.HstPtrBegin, Info.DataSize,
-                                  Info.TPR);
-
-          // If we are deleting the entry the DataMapMtx is locked and we own
-          // the entry.
-          if (Info.DelEntry) {
-            if (!FromMapperBase || FromMapperBase != Info.HstPtrBegin)
-              Ret = Device->deallocTgtPtr(HDTTMap, LR, Info.DataSize);
-
-            if (Ret != OFFLOAD_SUCCESS) {
-              REPORT("Deallocating data from device failed.\n");
-              break;
-            }
-          }
-        }
-
-        return Ret;
+        return postProcessingTargetDataEnd(Device, PostProcessingPtrs,
+                                           FromMapperBase);
       });
 
   return Ret;

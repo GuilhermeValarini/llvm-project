@@ -221,6 +221,7 @@ public:
   /// Returns if all asynchronous operations are completed.
   bool isDone();
 
+  /// Add a new post-processing function to be executed after synchronization.
   template<typename FuncTy>
   void addPostProcessingFunction(FuncTy Function) {
     static_assert(std::is_convertible_v<FuncTy, PostProcFuncTy>,
