@@ -680,14 +680,10 @@ struct PostProcessingInfo {
   /// The target pointer information.
   TargetPointerResultTy TPR;
 
-  /// Are we expecting to delete this entry or not. Even if set, we might not
-  /// delete the entry if another thread reused the entry in the meantime.
-  bool DelEntry;
-
   PostProcessingInfo(void *HstPtr, int64_t Size, int64_t ArgType, bool DelEntry,
-                     TargetPointerResultTy TPR)
-      : HstPtrBegin(HstPtr), DataSize(Size), ArgType(ArgType), TPR(TPR),
-        DelEntry(DelEntry) {}
+                     TargetPointerResultTy &&TPR)
+      : HstPtrBegin(HstPtr), DataSize(Size), ArgType(ArgType),
+        TPR(std::move(TPR)) {}
 };
 
 /// Apply \p CB to the shadow map pointer entries in the range \p Begin, to
@@ -730,8 +726,6 @@ static void applyToShadowMapEntries(DeviceTy &Device, CBTy CB, void *Begin,
   }
 }
 
-} // namespace
-
 /// Applies the necessary post-processing procedures to entries listed in \p
 /// EntriesInfo after the execution of all device side operations from a target
 /// data end. This includes the update of pointers at the host and removal of
@@ -744,25 +738,15 @@ postProcessingTargetDataEnd(DeviceTy *Device,
   int Ret = OFFLOAD_SUCCESS;
 
   for (PostProcessingInfo &Info : EntriesInfo) {
-    // If we marked the entry to be deleted we need to verify no other
-    // thread reused it by now. If deletion is still supposed to happen by
-    // this thread LR will be set and exclusive access to the HDTT map
-    // will avoid another thread reusing the entry now. Note that we do
-    // not request (exclusive) access to the HDTT map if Info.DelEntry is
-    // not set.
-    LookupResult LR;
-    DeviceTy::HDTTMapAccessorTy HDTTMap =
-        Device->HostDataToTargetMap.getExclusiveAccessor(!Info.DelEntry);
-
-    if (Info.DelEntry) {
-      LR = Device->lookupMapping(HDTTMap, Info.HstPtrBegin, Info.DataSize);
-      if (LR.Entry->getTotalRefCount() != 0 ||
-          LR.Entry->getDeleteThreadId() != std::this_thread::get_id()) {
-        // The thread is not in charge of deletion anymore. Give up access
-        // to the HDTT map and unset the deletion flag.
-        HDTTMap.destroy();
-        Info.DelEntry = false;
-      }
+    // Only delete the entry when the total ref count is zero and the current
+    // thread is the sole deleter.
+    auto HDTTMap = Device->HostDataToTargetMap.getExclusiveAccessor();
+    bool DelEntry = true;
+    if (Info.TPR.Flags.IsHostPointer ||
+        Info.TPR.Entry->getTotalRefCount() != 0 ||
+        Info.TPR.Entry->getDeleterThreadCount() != 1) {
+      HDTTMap.destroy();
+      DelEntry = false;
     }
 
     // If we copied back to the host a struct/array containing pointers,
@@ -780,7 +764,7 @@ postProcessingTargetDataEnd(DeviceTy *Device,
            DPxPTR(Itr->second.HstPtrVal), DPxPTR(ShadowHstPtrAddr));
       }
       // If the struct is to be deallocated, remove the shadow entry.
-      if (Info.DelEntry) {
+      if (DelEntry) {
         DP("Removing shadow pointer " DPxMOD "\n", DPxPTR((void **)Itr->first));
         auto OldItr = Itr;
         Itr++;
@@ -793,21 +777,26 @@ postProcessingTargetDataEnd(DeviceTy *Device,
     applyToShadowMapEntries(*Device, CB, Info.HstPtrBegin, Info.DataSize,
                             Info.TPR);
 
-    // If we are deleting the entry the DataMapMtx is locked and we own
-    // the entry.
-    if (Info.DelEntry) {
-      if (!FromMapperBase || FromMapperBase != Info.HstPtrBegin)
-        Ret = Device->deallocTgtPtr(HDTTMap, LR, Info.DataSize);
+    // If we are deleting the entry the DataMapMtx is locked and we own the
+    // entry.
+    if (DelEntry) {
+      if (!FromMapperBase || FromMapperBase != Info.HstPtrBegin) {
+        Device->eraseMapEntry(HDTTMap, Info.TPR.Entry, Info.DataSize);
+        // Since all necessary operations on the HDTTMap are completed, there is
+        // no need to hold its lock any more.
+        HDTTMap.destroy();
+        Ret = Device->deallocTgtPtrAndEntry(Info.TPR.Entry, Info.DataSize);
+      }
 
       if (Ret != OFFLOAD_SUCCESS) {
         REPORT("Deallocating data from device failed.\n");
-        break;
       }
     }
   }
 
   return Ret;
 }
+} // namespace
 
 /// Internal function to undo the mapping and retrieve the data from the device.
 int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
@@ -872,11 +861,12 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
     bool ForceDelete = ArgTypes[I] & OMP_TGT_MAPTYPE_DELETE;
     bool HasPresentModifier = ArgTypes[I] & OMP_TGT_MAPTYPE_PRESENT;
     bool HasHoldModifier = ArgTypes[I] & OMP_TGT_MAPTYPE_OMPX_HOLD;
+    const bool FromDataEnd = true;
 
     // If PTR_AND_OBJ, HstPtrBegin is address of pointee
     TargetPointerResultTy TPR = Device.getTgtPtrBegin(
         HstPtrBegin, DataSize, IsLast, UpdateRef, HasHoldModifier, IsHostPtr,
-        !IsImplicit, ForceDelete);
+        !IsImplicit, ForceDelete, FromDataEnd);
     void *TgtPtrBegin = TPR.TargetPointer;
     if (!TPR.isPresent() && !TPR.isHostPointer() &&
         (DataSize || HasPresentModifier)) {
@@ -970,7 +960,7 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
 
       // Add pointer to the buffer for post-synchronize processing.
       PostProcessingPtrs.emplace_back(HstPtrBegin, DataSize, ArgTypes[I],
-                                      DelEntry && !IsHostPtr, TPR);
+                                      DelEntry && !IsHostPtr, std::move(TPR));
     }
   }
 

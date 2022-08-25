@@ -48,6 +48,12 @@ template <typename Ty> struct Accessor {
   /// Constructor to get exclusive access by taking it from \p Other.
   Accessor(Accessor<Ty> &&Other) : Ptr(Other.Ptr) { Other.Ptr = nullptr; }
 
+  /// Move-assign to get exclusive access by taking it from \p Other.
+  Accessor &operator=(Accessor<Ty> &&Other) {
+    Ptr = Other.Ptr;
+    Other.Ptr = nullptr;
+  }
+
   Accessor(Accessor &Other) = delete;
 
   /// If the object is still owned when the lifetime ends we give up access.
