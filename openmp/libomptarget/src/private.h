@@ -213,21 +213,21 @@ static inline AsyncInfoTy *acquireTaskAsyncInfo(int GTID, DeviceTy &Device,
 /// Delete AsyncInfo if it is completed and remove it from the current task
 /// async handle.
 static inline void completeTaskAsyncInfo(int GTID, AsyncInfoTy *AsyncInfo) {
-  if (AsyncInfo->isDone()) {
-    delete AsyncInfo;
-    __kmpc_omp_set_target_async_handle(GTID, NULL);
-  }
+  if (!AsyncInfo->isDone())
+    return;
+
+  delete AsyncInfo;
+  __kmpc_omp_set_target_async_handle(GTID, NULL);
 }
 
 /// Define the synchronization type based on the current task context. Only
 /// tasks with an assigned task team can be re-enqueue and thus can use the
 /// non-blocking synchronization scheme.
 static inline AsyncInfoTy::SyncType getSyncTypeFromTask(int GTID) {
-  if (__kmpc_omp_has_task_team(GTID)) {
+  if (__kmpc_omp_has_task_team(GTID))
     return AsyncInfoTy::SyncType::NON_BLOCKING;
-  } else {
-    return AsyncInfoTy::SyncType::BLOCKING;
-  }
+
+  return AsyncInfoTy::SyncType::BLOCKING;
 }
 
 #include "llvm/Support/TimeProfiler.h"

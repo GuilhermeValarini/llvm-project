@@ -190,6 +190,8 @@ class AsyncInfoTy {
   std::deque<void *> BufferLocations;
 
   /// Post-processing operations executed after a successful synchronization.
+  /// \note the post-processing function should return OFFLOAD_SUCCESS or
+  /// OFFLOAD_FAIL appropriately.
   using PostProcFuncTy = std::function<int()>;
   llvm::SmallVector<PostProcFuncTy> PostProcessingFunctions;
 
@@ -218,12 +220,19 @@ public:
   /// AsyncInfoTy object. The location can be used as intermediate buffer.
   void *&getVoidPtrLocation();
 
-  /// Returns if all asynchronous operations are completed.
+  /// Check if all asynchronous operations are completed.
+  ///
+  /// \returns true if there is no pending asynchronous operations, false
+  /// otherwise.
   bool isDone();
 
   /// Add a new post-processing function to be executed after synchronization.
+  ///
+  /// \param[in] Function is a templated function (e.g., function pointers,
+  /// lambdas, std::function) that can be convertible to a PostProcFuncTy (i.e.,
+  /// it must have int() as its function signature).
   template<typename FuncTy>
-  void addPostProcessingFunction(FuncTy Function) {
+  void addPostProcessingFunction(FuncTy &&Function) {
     static_assert(std::is_convertible_v<FuncTy, PostProcFuncTy>,
                   "Invalid post-processing function type. Please check "
                   "function signature!");

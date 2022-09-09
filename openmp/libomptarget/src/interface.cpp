@@ -389,10 +389,10 @@ EXTERN int __tgt_target_kernel_nowait(
 
   int Rc = OFFLOAD_SUCCESS;
   if (ShouldDispatch) {
-  Rc = target(Loc, Device, HostPtr, Args->NumArgs, Args->ArgBasePtrs,
-                  Args->ArgPtrs, Args->ArgSizes, Args->ArgTypes, Args->ArgNames,
-                  Args->ArgMappers, NumTeams, ThreadLimit, Args->Tripcount,
-                  IsTeams, *AsyncInfo);
+    Rc = target(Loc, Device, HostPtr, Args->NumArgs, Args->ArgBasePtrs,
+                Args->ArgPtrs, Args->ArgSizes, Args->ArgTypes, Args->ArgNames,
+                Args->ArgMappers, NumTeams, ThreadLimit, Args->Tripcount,
+                IsTeams, *AsyncInfo);
   }
   if (Rc == OFFLOAD_SUCCESS)
     Rc = AsyncInfo->synchronize(SyncType);

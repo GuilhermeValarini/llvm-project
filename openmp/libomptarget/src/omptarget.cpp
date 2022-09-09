@@ -34,7 +34,7 @@ int AsyncInfoTy::synchronize(SyncType SyncType) {
              "are no outstanding actions!");
       break;
     case SyncType::NON_BLOCKING:
-      Result = Device.synchronizeAsync(*this);
+      Result = Device.queryAsync(*this);
       break;
     }
   }
@@ -716,14 +716,18 @@ static void applyToShadowMapEntries(DeviceTy &Device, CBTy CB, void *Begin,
 
 } // namespace
 
+/// Applies the necessary post-processing procedures to entries listed in \p
+/// EntriesInfo after the execution of all device side operations from a target
+/// data end. This includes the update of pointers at the host and removal of
+/// device buffer when needed. It returns OFFLOAD_FAIL or OFFLOAD_SUCCESS
+/// according to the successfulness of the operations.
 static int
 postProcessingTargetDataEnd(DeviceTy *Device,
-                            SmallVector<PostProcessingInfo> PostProcessingPtrs,
+                            SmallVector<PostProcessingInfo> EntriesInfo,
                             void * FromMapperBase) {
   int Ret = OFFLOAD_SUCCESS;
 
-  // Deallocate target pointer
-  for (PostProcessingInfo &Info : PostProcessingPtrs) {
+  for (PostProcessingInfo &Info : EntriesInfo) {
     // If we marked the entry to be deleted we need to verify no other
     // thread reused it by now. If deletion is still supposed to happen by
     // this thread LR will be set and exclusive access to the HDTT map
@@ -1508,7 +1512,7 @@ static int processDataAfter(ident_t *Loc, int64_t DeviceId, void *HostPtr,
 
   // Free target memory for private arguments after synchronization.
   AsyncInfo.addPostProcessingFunction(
-      [PrivateArgumentManager = 
+      [PrivateArgumentManager =
            std::move(PrivateArgumentManager)]() mutable -> int {
         int Ret = PrivateArgumentManager.free();
         if (Ret != OFFLOAD_SUCCESS) {

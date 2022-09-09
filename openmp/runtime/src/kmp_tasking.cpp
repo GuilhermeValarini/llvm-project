@@ -1096,8 +1096,8 @@ static void __kmp_task_finish(kmp_int32 gtid, kmp_task_t *task,
   // Tasks with valid target async handles must be re-enqueued.
   if (taskdata->td_target_data.async_handle != NULL) {
     // Note: no need to translate gtid to its shadow. If the current thread is a
-    // hidden helper one, than the gtid is already correct. Otherwise, hidden
-    // helper threads are disabled, and gtid refers to a OpenMP thread. 
+    // hidden helper one, then the gtid is already correct. Otherwise, hidden
+    // helper threads are disabled, and gtid refers to a OpenMP thread.
     __kmpc_give_task(task, __kmp_tid_from_gtid(gtid));
     if (KMP_HIDDEN_HELPER_THREAD(gtid))
       __kmp_hidden_helper_worker_thread_signal();
@@ -5186,7 +5186,7 @@ void __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle) {
 @return Returns true if the current thread of the given thread has a task team
 allocated to it.
 
-Checks if the current task has a task team.
+Checks if the current thread has a task team.
 */
 KMP_EXPORT bool __kmpc_omp_has_task_team(kmp_int32 gtid) {
   kmp_info_t *thread = __kmp_thread_from_gtid(gtid);
