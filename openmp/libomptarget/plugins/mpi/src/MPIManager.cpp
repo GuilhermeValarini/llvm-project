@@ -165,8 +165,8 @@ void MPIManagerTy::registerLib(__tgt_bin_desc *Desc) {
     __tgt_device_image *Img = &Desc->DeviceImages[I];
 
     if (!isValidBinary(Img)) {
-      REPORT("Image " DPxMOD " is NOT compatible with this MPI device!\n",
-             DPxPTR(Img->ImageStart));
+      DP("Image " DPxMOD " is NOT compatible with this MPI device!\n",
+         DPxPTR(Img->ImageStart));
       continue;
     }
 
@@ -193,8 +193,10 @@ __tgt_target_table *MPIManagerTy::loadBinary(const int DeviceId,
   DP("Dev %d: load binary from " DPxMOD " image\n", DeviceId,
      DPxPTR(Image->ImageStart));
 
-  if (checkValidDeviceId(DeviceId))
+  if (!checkValidDeviceId(DeviceId)) {
+    REPORT("Trying to load a binary into an invalid device ID %d\n", DeviceId);
     return nullptr;
+  }
 
   size_t ImageSize = (size_t)Image->ImageEnd - (size_t)Image->ImageStart;
 
@@ -277,8 +279,7 @@ int MPIManagerTy::getNumOfDevices() const {
 
 bool MPIManagerTy::checkValidDeviceId(const int DeviceId) const {
   if (!isValidDeviceId(DeviceId)) {
-    REPORT("Failed to load binary. Received device id %d out of range of valid "
-           "ids [%d, %d]\n",
+    REPORT("Received device id %d out of range of valid ids [%d, %d]\n",
            DeviceId, 0, EventSystem.getNumWorkers());
     return false;
   }
@@ -474,30 +475,24 @@ int32_t MPIManagerTy::synchronize(int32_t DeviceId,
   return Result;
 }
 
-////////////////////////////////////////////////////////////////////////////////
-/// Start device main for worker ranks
-int32_t MPIManagerTy::startDeviceMain(__tgt_bin_desc *desc) {
+bool MPIManagerTy::isInsideDevice() { return !EventSystem.isHead(); }
+
+void MPIManagerTy::runDeviceMain(__tgt_bin_desc *Desc) {
   // Check whether it is a device or not and if so run its initialization
   if (EventSystem.isHead())
-    return OFFLOAD_SUCCESS;
+    return;
 
-  DP("Running main function on workers\n");
-
-  registerLib(desc);
+  registerLib(Desc);
 
   EventSystem.runGateThread(getOffloadEntriesTableOnWorker());
 
-  DP("Exiting main function on workers\n");
-
-  // Will call the destructor of all static objects, thus all the MPI
-  // finalization code will be called.
-  exit(0);
+  std::exit(EXIT_SUCCESS);
 }
 
 // Synchronization event management
 // ===========================================================================
 int32_t MPIManagerTy::createEvent(int32_t ID, void **Event) {
-  if (checkRecordedEventPtr(Event))
+  if (!checkRecordedEventPtr(Event))
     return OFFLOAD_FAIL;
 
   auto RecordedEvent = new EventPtr;
@@ -512,7 +507,7 @@ int32_t MPIManagerTy::createEvent(int32_t ID, void **Event) {
 }
 
 int32_t MPIManagerTy::destroyEvent(int32_t ID, void *Event) {
-  if (checkRecordedEventPtr(Event))
+  if (!checkRecordedEventPtr(Event))
     return OFFLOAD_FAIL;
 
   delete reinterpret_cast<EventPtr *>(Event);
@@ -522,7 +517,7 @@ int32_t MPIManagerTy::destroyEvent(int32_t ID, void *Event) {
 
 int32_t MPIManagerTy::recordEvent(int32_t ID, void *Event,
                                   __tgt_async_info *AsyncInfo) {
-  if (checkRecordedEventPtr(Event))
+  if (!checkRecordedEventPtr(Event))
     return OFFLOAD_FAIL;
 
   if (AsyncInfo == nullptr || AsyncInfo->Queue == nullptr) {
@@ -545,7 +540,7 @@ int32_t MPIManagerTy::recordEvent(int32_t ID, void *Event,
 
 int32_t MPIManagerTy::waitEvent(int32_t ID, void *Event,
                                 __tgt_async_info *AsyncInfo) {
-  if (checkRecordedEventPtr(Event))
+  if (!checkRecordedEventPtr(Event))
     return OFFLOAD_FAIL;
 
   if (AsyncInfo == nullptr) {
@@ -570,7 +565,7 @@ int32_t MPIManagerTy::waitEvent(int32_t ID, void *Event,
 }
 
 int32_t MPIManagerTy::syncEvent(int32_t ID, void *Event) {
-  if (checkRecordedEventPtr(Event))
+  if (!checkRecordedEventPtr(Event))
     return OFFLOAD_FAIL;
 
   auto &RecordedEvent = *reinterpret_cast<EventPtr *>(Event);

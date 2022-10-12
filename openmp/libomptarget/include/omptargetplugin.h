@@ -192,6 +192,14 @@ int32_t __tgt_rtl_init_async_info(int32_t ID, __tgt_async_info **AsyncInfoPtr);
 int32_t __tgt_rtl_init_device_info(int32_t ID, __tgt_device_info *DeviceInfoPtr,
                                    const char **ErrStr);
 
+// Check if the current code is being executed inside the device itself. If that
+// is the case, the device main function must be executed.
+int32_t __tgt_rtl_is_inside_device();
+
+// Run device main if supported. The program will immediately exit after a
+// successful execution.
+void __tgt_rtl_run_device_main(__tgt_bin_desc *desc);
+
 #ifdef __cplusplus
 }
 #endif

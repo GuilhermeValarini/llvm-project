@@ -41,6 +41,10 @@ EXTERN void __tgt_register_lib(__tgt_bin_desc *Desc) {
     }
   }
   PM->RTLs.registerLib(Desc);
+
+  // Run device main instead of host main.
+  for (auto &R : PM->RTLs.ExecutableRTLs)
+    R->run_device_main(Desc);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

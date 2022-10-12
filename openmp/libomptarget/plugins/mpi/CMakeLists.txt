@@ -69,4 +69,4 @@ if(LIBOMPTARGET_DEP_MPI_COMPILE_FLAGS)
 endif()
 
 # Report to the parent scope that we are building a plugin for MPI.
-set(LIBOMPTARGET_SYSTEM_TARGETS "${LIBOMPTARGET_SYSTEM_TARGETS} x86_64-pc-linux-gnu-ompc" PARENT_SCOPE)
+set(LIBOMPTARGET_SYSTEM_TARGETS "${LIBOMPTARGET_SYSTEM_TARGETS} x86_64-pc-linux-gnu-mpi" PARENT_SCOPE)

@@ -75,6 +75,8 @@ struct RTLInfoTy {
   typedef int32_t(init_async_info_ty)(int32_t, __tgt_async_info **);
   typedef int64_t(init_device_into_ty)(int64_t, __tgt_device_info *,
                                        const char **);
+  typedef int32_t(is_inside_device_ty)();
+  typedef void(run_device_main_ty)(__tgt_bin_desc *);
 
   int32_t Idx = -1;             // RTL index, index is the number of devices
                                 // of other RTLs that were registered before,
@@ -125,6 +127,8 @@ struct RTLInfoTy {
   init_async_info_ty *init_async_info = nullptr;
   init_device_into_ty *init_device_info = nullptr;
   release_async_info_ty *release_async_info = nullptr;
+  run_device_main_ty *run_device_main = nullptr;
+  is_inside_device_ty *is_inside_device = nullptr;
 
   // Are there images associated with this RTL.
   bool IsUsed = false;
@@ -141,6 +145,9 @@ struct RTLInfoTy {
 struct RTLsTy {
   // List of the detected runtime libraries.
   std::list<RTLInfoTy> AllRTLs;
+
+  // List of runtime devices with a main function.
+  llvm::SmallVector<RTLInfoTy *> ExecutableRTLs;
 
   // Array of pointers to the detected runtime libraries that have compatible
   // binaries.
