@@ -30,6 +30,7 @@ using namespace llvm::omp::target;
 
 // List of all plugins that can support offloading.
 static const char *RTLNames[] = {
+    /* MPI target           */ "libomptarget.rtl.mpi",
     /* PowerPC target       */ "libomptarget.rtl.ppc64",
     /* x86_64 target        */ "libomptarget.rtl.x86_64",
     /* CUDA target          */ "libomptarget.rtl.cuda",
@@ -133,9 +134,12 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
 
   DP("Successfully loaded library '%s'!\n", Name);
 
-  // Remove plugin on failure to call optional init_plugin
+  // Remove plugin on failure to call optional init_plugin. Preloading deinit
+  // for unsupported devices.
   *((void **)&RTL.init_plugin) =
       DynLibrary->getAddressOfSymbol("__tgt_rtl_init_plugin");
+  *((void **)&RTL.deinit_plugin) =
+      DynLibrary->getAddressOfSymbol("__tgt_rtl_deinit_plugin");
   if (RTL.init_plugin) {
     int32_t Rc = RTL.init_plugin();
     if (Rc != OFFLOAD_SUCCESS) {
@@ -177,13 +181,41 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
   // Invalid plugin
   if (!ValidPlugin) {
     DP("Invalid plugin as necessary interface is not found.\n");
+
+    // Deinit plugin before removing it.
+    if (RTL.deinit_plugin) {
+      int32_t Rc = RTL.deinit_plugin();
+      if (Rc != OFFLOAD_SUCCESS)
+        DP("Unable to deinitialize library '%s': %u!\n", Name, Rc);
+    }
+
     return false;
   }
 
+  // Check if we are executing code inside the device itself and if we should
+  // run its main function.
+  (*((void **)&RTL.is_inside_device) =
+       DynLibrary->getAddressOfSymbol("__tgt_rtl_is_inside_device"));
+  (*((void **)&RTL.run_device_main) =
+       DynLibrary->getAddressOfSymbol("__tgt_rtl_run_device_main"));
+  const bool IsExecutable =
+      RTL.is_inside_device && RTL.is_inside_device() && RTL.run_device_main;
+  if (IsExecutable) {
+    ExecutableRTLs.emplace_back(&RTL);
+  }
+
   // No devices are supported by this RTL?
-  if (!(RTL.NumberOfDevices = RTL.number_of_devices())) {
+  if (!(RTL.NumberOfDevices = RTL.number_of_devices()) && !(IsExecutable)) {
     // The RTL is invalid! Will pop the object from the RTLs list.
     DP("No devices supported in this RTL\n");
+
+    // Deinit plugin before removing it.
+    if (RTL.deinit_plugin) {
+      int32_t Rc = RTL.deinit_plugin();
+      if (Rc != OFFLOAD_SUCCESS)
+        DP("Unable to deinitialize library '%s': %u!\n", Name, Rc);
+    }
+
     return false;
   }
 
@@ -579,10 +611,10 @@ void RTLsTy::unregisterLib(__tgt_bin_desc *Desc) {
   PM->TblMapMtx.unlock();
 
   // TODO: Write some RTL->unload_image(...) function?
-  for (auto *R : UsedRTLs) {
-    if (R->deinit_plugin) {
-      if (R->deinit_plugin() != OFFLOAD_SUCCESS) {
-        DP("Failure deinitializing RTL %s!\n", R->RTLName.c_str());
+  for (auto &R : AllRTLs) {
+    if (R.deinit_plugin) {
+      if (R.deinit_plugin() != OFFLOAD_SUCCESS) {
+        DP("Failure deinitializing RTL %s!\n", R.RTLName.c_str());
       }
     }
   }

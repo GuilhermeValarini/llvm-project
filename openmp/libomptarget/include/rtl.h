@@ -137,6 +137,9 @@ struct RTLsTy {
   // List of the detected runtime libraries.
   std::list<RTLInfoTy> AllRTLs;
 
+  // List of runtime devices with a main function.
+  llvm::SmallVector<RTLInfoTy *> ExecutableRTLs;
+
   // Array of pointers to the detected runtime libraries that have compatible
   // binaries.
   llvm::SmallVector<RTLInfoTy *> UsedRTLs;
@@ -164,7 +167,7 @@ struct RTLsTy {
   void loadRTLs();
 
 private:
-  static bool attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL);
+  bool attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL);
 };
 
 /// Map between the host entry begin and the translation table. Each

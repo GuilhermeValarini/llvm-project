@@ -164,8 +164,12 @@ public:
 
   int32_t synchronize(int32_t DeviceId, __tgt_async_info *AsyncInfo);
 
+  // Device side functions.
+  // ===========================================================================
+  bool isInsideDevice();
+
   // Start device main for worker ranks
-  int32_t startDeviceMain(__tgt_bin_desc *Desc);
+  void runDeviceMain(__tgt_bin_desc *Desc);
 
   // External events management
   // ===========================================================================
