@@ -103,12 +103,6 @@ int32_t __tgt_rtl_deinit_device(int32_t DeviceId) { return OFFLOAD_SUCCESS; }
 
 __tgt_target_table *__tgt_rtl_load_binary(int32_t DeviceId,
                                           __tgt_device_image *Image) {
-  // Move this into MPIManager::loadBinary
-  if (!MPIManager->isValidDeviceId(DeviceId)) {
-    REPORT("Trying to load a binary into an invalid device ID %d\n", DeviceId);
-    return nullptr;
-  }
-
   return MPIManager->loadBinary(DeviceId, Image);
 }
 
@@ -219,8 +213,10 @@ int32_t __tgt_rtl_destroy_event(int32_t DeviceId, void *Event) {
   return MPIManager->destroyEvent(DeviceId, Event);
 }
 
-int32_t __tgt_rtl_start_devices(__tgt_bin_desc *Desc) {
-  return MPIManager->startDeviceMain(Desc);
+int32_t __tgt_rtl_is_inside_device() { return MPIManager->isInsideDevice(); }
+
+void __tgt_rtl_run_device_main(__tgt_bin_desc *Desc) {
+  MPIManager->runDeviceMain(Desc);
 }
 
 #ifdef __cplusplus
