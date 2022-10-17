@@ -66,8 +66,8 @@ static inline void targetDataMapper(
     void **ArgsBase, void **Args, int64_t *ArgSizes, int64_t *ArgTypes,
     map_var_info_t *ArgNames, void **ArgMappers, AsyncInfoTy &AsyncInfo,
     TargetDataFuncPtrTy TargetDataFunction, const char *RegionTypeMsg,
-    AsyncInfoTy::SyncType SyncType = AsyncInfoTy::SyncType::BLOCKING,
-    bool Dispatch = true, bool FromMapper = false) {
+    AsyncInfoTy::SyncTypeTy SyncType = AsyncInfoTy::SyncTypeTy::BLOCKING,
+    bool Dispatch = true) {
   TIMESCOPE_WITH_IDENT(Loc);
 
   if (getInfoLevel() & OMP_INFOTYPE_KERNEL_ARGS)
@@ -86,7 +86,7 @@ static inline void targetDataMapper(
   if (Dispatch)
     Rc = TargetDataFunction(Loc, Device, ArgNum, ArgsBase, Args, ArgSizes,
                             ArgTypes, ArgNames, ArgMappers, AsyncInfo,
-                            FromMapper);
+                            false /* FromMapper */);
 
   if (Rc == OFFLOAD_SUCCESS)
     Rc = AsyncInfo.synchronize(SyncType);
@@ -244,12 +244,12 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
                    AsyncInfo.shouldDispatch());
 }
 
-static inline int
-targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t NumTeams,
-             int32_t ThreadLimit, void *HostPtr, __tgt_kernel_arguments *Args,
-             AsyncInfoTy &AsyncInfo,
-             AsyncInfoTy::SyncType SyncType = AsyncInfoTy::SyncType::BLOCKING,
-             bool Dispatch = true) {
+static inline int targetKernel(
+    ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t NumTeams,
+    int32_t ThreadLimit, void *HostPtr, __tgt_kernel_arguments *Args,
+    AsyncInfoTy &AsyncInfo,
+    AsyncInfoTy::SyncTypeTy SyncType = AsyncInfoTy::SyncTypeTy::BLOCKING,
+    bool Dispatch = true) {
   TIMESCOPE_WITH_IDENT(Loc);
 
   if (Args->Version != 1) {
@@ -276,7 +276,7 @@ targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t NumTeams,
     NumTeams = 0;
 
   int Rc = OFFLOAD_SUCCESS;
-  if (AsyncInfo.isDone())
+  if (Dispatch)
     Rc = target(Loc, Device, HostPtr, Args->NumArgs, Args->ArgBasePtrs,
                 Args->ArgPtrs, Args->ArgSizes, Args->ArgTypes, Args->ArgNames,
                 Args->ArgMappers, NumTeams, ThreadLimit, Args->Tripcount,

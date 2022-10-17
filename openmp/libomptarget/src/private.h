@@ -195,7 +195,7 @@ printKernelArguments(const ident_t *Loc, const int64_t DeviceId,
 
 class TaskAsyncInfoTy {
   const int ExecThreadID = -1;
-  AsyncInfoTy::SyncType SyncType = AsyncInfoTy::SyncType::BLOCKING;
+  AsyncInfoTy::SyncTypeTy SyncType = AsyncInfoTy::SyncTypeTy::BLOCKING;
   AsyncInfoTy *AsyncInfo = nullptr;
   bool IsNew = false;
 
@@ -217,7 +217,7 @@ public:
     // tasks with an assigned task team can be re-enqueue and thus can use the
     // non-blocking synchronization scheme.
     if (__kmpc_omp_has_task_team(ExecThreadID))
-      SyncType = AsyncInfoTy::SyncType::NON_BLOCKING;
+      SyncType = AsyncInfoTy::SyncTypeTy::NON_BLOCKING;
   }
 
   /// Delete AsyncInfo if it is completed and remove it from the current task
@@ -232,14 +232,14 @@ public:
 
   AsyncInfoTy &operator*() { return *AsyncInfo; }
 
-  AsyncInfoTy::SyncType getSyncType() { return SyncType; }
+  AsyncInfoTy::SyncTypeTy getSyncType() { return SyncType; }
 
   /// Return if the device side operations should be dispatched or not. When the
   /// async info attached to the task struct was just created, the target region
   /// operations must be dispatched and accumulated on the internal AsyncInfo.
   /// Otherwise, the operations were already dispatched before and only
   /// synchronization is needed.
-  bool shouldDispatch() { return !IsNew; }
+  bool shouldDispatch() { return IsNew; }
 };
 
 #include "llvm/Support/TimeProfiler.h"

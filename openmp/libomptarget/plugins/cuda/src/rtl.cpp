@@ -1271,17 +1271,15 @@ public:
     CUstream Stream = reinterpret_cast<CUstream>(AsyncInfo->Queue);
     CUresult Err = cuStreamQuery(Stream);
 
-    if (Err == CUDA_ERROR_NOT_READY) {
-      // Not ready streams must be considered as successful operations.
-      Err = CUDA_SUCCESS;
-    } else {
-      // Once the stream is synchronized or an error occurs, return it to the
-      // stream pool and reset AsyncInfo. This is to make sure the
-      // synchronization only works for its own tasks.
-      StreamPool[DeviceId]->release(
-          reinterpret_cast<CUstream>(AsyncInfo->Queue));
-      AsyncInfo->Queue = nullptr;
-    }
+    // Not ready streams must be considered as successful operations.
+    if (Err == CUDA_ERROR_NOT_READY)
+      return OFFLOAD_SUCCESS;
+
+    // Once the stream is synchronized or an error occurs, return it to the
+    // stream pool and reset AsyncInfo. This is to make sure the
+    // synchronization only works for its own tasks.
+    StreamPool[DeviceId]->release(Stream);
+    AsyncInfo->Queue = nullptr;
 
     if (Err != CUDA_SUCCESS) {
       DP("Error when querying for stream progress. stream = " DPxMOD

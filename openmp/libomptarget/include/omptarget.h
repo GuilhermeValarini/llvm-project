@@ -199,7 +199,7 @@ class AsyncInfoTy {
   DeviceTy &Device;
 
 public:
-  enum class SyncType {
+  enum class SyncTypeTy {
     BLOCKING,
     NON_BLOCKING
   };
@@ -214,7 +214,7 @@ public:
   /// Synchronize all pending actions.
   ///
   /// \returns OFFLOAD_FAIL or OFFLOAD_SUCCESS appropriately.
-  int synchronize(SyncType SyncType = SyncType::BLOCKING);
+  int synchronize(SyncTypeTy SyncType = SyncTypeTy::BLOCKING);
 
   /// Return a void* reference with a lifetime that is at least as long as this
   /// AsyncInfoTy object. The location can be used as intermediate buffer.

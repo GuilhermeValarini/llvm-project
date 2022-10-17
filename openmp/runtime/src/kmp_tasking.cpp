@@ -5183,8 +5183,8 @@ void __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle) {
 /*!
 @ingroup TASKING
 @param gtid Global Thread ID of current thread
-@return Returns true if the current thread of the given thread has a task team
-allocated to it.
+@return Returns true if the current task being executed of the given thread has
+a task team allocated to it.
 
 Checks if the current thread has a task team.
 */

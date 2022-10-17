@@ -22,18 +22,18 @@
 
 using llvm::SmallVector;
 
-int AsyncInfoTy::synchronize(SyncType SyncType) {
+int AsyncInfoTy::synchronize(SyncTypeTy SyncType) {
   int Result = OFFLOAD_SUCCESS;
   if (AsyncInfo.Queue) {
     switch (SyncType) {
-    case SyncType::BLOCKING:
+    case SyncTypeTy::BLOCKING:
       // If we have a queue we need to synchronize it now.
       Result = Device.synchronize(*this);
       assert(AsyncInfo.Queue == nullptr &&
              "The device plugin should have nulled the queue to indicate there "
              "are no outstanding actions!");
       break;
-    case SyncType::NON_BLOCKING:
+    case SyncTypeTy::NON_BLOCKING:
       Result = Device.queryAsync(*this);
       break;
     }
