@@ -1,4 +1,4 @@
-//===------ event_system.cpp - Concurrent MPI communicaiton -----*- C++ -*-===//
+//===------ event_system.cpp - Concurrent MPI communication -----*- C++ -*-===//
 //
 // Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
 // See https://llvm.org/LICENSE.txt for license information.
