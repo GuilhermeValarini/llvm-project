@@ -46,8 +46,8 @@ constexpr const char *toString(const TargetAllocTy &Kind) {
   }
 }
 
-void *MPIDeviceAllocatorTy::allocate(size_t Size, void *HostPtr,
-                                     TargetAllocTy Kind) {
+void *MPIManagerTy::MPIDeviceAllocatorTy::allocate(size_t Size, void *HostPtr,
+                                                   TargetAllocTy Kind) {
   if (Kind != TargetAllocTy::TARGET_ALLOC_DEFAULT &&
       Kind != TargetAllocTy::TARGET_ALLOC_DEVICE) {
     REPORT("Invalid allocation kind %s. MPI plugin only supports "
@@ -70,7 +70,8 @@ void *MPIDeviceAllocatorTy::allocate(size_t Size, void *HostPtr,
   return DevicePtr;
 }
 
-int MPIDeviceAllocatorTy::free(void *TargetPtr, TargetAllocTy Kind) {
+int MPIManagerTy::MPIDeviceAllocatorTy::free(void *TargetPtr,
+                                             TargetAllocTy Kind) {
   if (Kind != TargetAllocTy::TARGET_ALLOC_DEFAULT &&
       Kind != TargetAllocTy::TARGET_ALLOC_DEVICE) {
     REPORT("Invalid allocation kind %s. MPI plugin only supports "
@@ -192,7 +193,6 @@ __tgt_target_table *MPIManagerTy::getOffloadEntriesTableOnWorker() {
   return getOffloadEntriesTable(0);
 }
 
-// TODO: Replace worker by device.
 void MPIManagerTy::registerLibOnWorker(__tgt_bin_desc *Desc) {
   // Register the images with the RTLs that understand them, if any.
   for (int32_t I = 0; I < Desc->NumDeviceImages; ++I) {

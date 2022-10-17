@@ -798,7 +798,6 @@ EventPtr EventQueue::pop() {
 MPI_Comm EventSystemTy::GateThreadComm = MPI_COMM_NULL;
 int32_t EventSystemTy::MPITagMaxValue = 0;
 
-// TODO: start MPI context
 EventSystemTy::EventSystemTy() : EventSystemState(EventSystemStateTy::CREATED) {
   // Read environment parameters
   if (const char *env_str = std::getenv("OMPCLUSTER_MPI_FRAGMENT_SIZE")) {
