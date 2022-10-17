@@ -476,9 +476,12 @@ enum class ControlTagsTy : int {
 ///
 /// Describes the event system state through the program.
 enum class EventSystemStateTy {
-  CREATED, // ES was created but it is not ready to receive new events.
-  RUNNING, // ES is running and ready to receive new events.
-  EXITED   // ES was stopped and receive new events.
+  CREATED,     // ES was created but it is not ready to send or receive new
+               // events.
+  INITIALIZED, // ES was initialized alongside internal MPI states. It is ready
+               // to send new events, but not receive them.
+  RUNNING,     // ES is running and ready to receive new events.
+  EXITED       // ES was stopped.
 };
 
 /// The distributed event system.
@@ -511,6 +514,8 @@ private:
   /// Event System execution state.
   std::atomic<EventSystemStateTy> EventSystemState{};
 
+  bool IsInitialized = false;
+
 private:
   /// Function executed by the event handler threads.
   void runEventHandler(EventQueue &Queue);
@@ -530,10 +535,11 @@ public:
   /// Destroy the local MPI context and all of its comms.
   bool destroyLocalMPIContext();
 
-  /// Event System default constructor.
   EventSystemTy();
-  /// Event System default destructor.
   ~EventSystemTy();
+
+  bool initialize();
+  bool deinitialize();
 
   /// Creates a new event.
   ///

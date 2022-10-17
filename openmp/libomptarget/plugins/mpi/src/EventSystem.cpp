@@ -833,11 +833,36 @@ EventSystemTy::EventSystemTy() : EventSystemState(EventSystemStateTy::CREATED) {
     assertm(config::NUM_EVENT_COMM >= 1,
             "At least on communicator need to be spawned");
   }
-
-  createLocalMPIContext();
 }
 
 EventSystemTy::~EventSystemTy() {
+  if (!IsInitialized)
+    return;
+
+  REPORT("Destructing internal event system before deinitializing it.\n");
+  deinitialize();
+}
+
+bool EventSystemTy::initialize() {
+  if (IsInitialized) {
+    REPORT("Trying to initialize event system twice.\n");
+    return false;
+  }
+
+  if (!createLocalMPIContext())
+    return false;
+
+  IsInitialized = true;
+
+  return true;
+}
+
+bool EventSystemTy::deinitialize() {
+  if (!IsInitialized) {
+    REPORT("Trying to deinitialize event system twice.\n");
+    return false;
+  }
+
   // Only send exit events from the host side
   if (isHead() && WorldSize > 1) {
     const int NumWorkers = WorldSize - 1;
@@ -847,12 +872,25 @@ EventSystemTy::~EventSystemTy() {
       ExitEvents[WorkerRank]->progress();
     }
 
+    bool SuccessfullyExited = true;
     for (int WorkerRank = 0; WorkerRank < NumWorkers; WorkerRank++) {
       ExitEvents[WorkerRank]->wait();
+      SuccessfullyExited &=
+          ExitEvents[WorkerRank]->getEventState() == EventStateTy::FINISHED;
+    }
+
+    if (!SuccessfullyExited) {
+      REPORT("Failed to stop worker processes.\n");
+      return false;
     }
   }
 
-  destroyLocalMPIContext();
+  if (!destroyLocalMPIContext())
+    return false;
+
+  IsInitialized = false;
+
+  return true;
 }
 
 void EventSystemTy::runEventHandler(EventQueue &Queue) {
