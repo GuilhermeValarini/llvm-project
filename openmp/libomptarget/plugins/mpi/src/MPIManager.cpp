@@ -24,15 +24,15 @@
 #include <string>
 #include <vector>
 
-// ELF utilities definitions
-// ===========================================================================
+// ELF utilities definitions.
+// =============================================================================
 #ifndef TARGET_ELF_ID
 #define TARGET_ELF_ID 0
 #endif
 #include "elf_common.h"
 
-// Memory Allocator
-// ===========================================================================
+// Memory Allocator.
+// =============================================================================
 constexpr const char *toString(const TargetAllocTy &Kind) {
   switch (Kind) {
   case TargetAllocTy::TARGET_ALLOC_DEFAULT:
@@ -88,10 +88,27 @@ int MPIDeviceAllocatorTy::free(void *TargetPtr, TargetAllocTy Kind) {
   return OFFLOAD_SUCCESS;
 }
 
-// MPI Manager
-// ===========================================================================
+// MPI Manager.
+// =============================================================================
+// De/initialization functions.
+// =============================================================================
+MPIManagerTy::~MPIManagerTy() {
+  if (!IsInitialized)
+    return;
 
-MPIManagerTy::MPIManagerTy() : EventSystem() {
+  REPORT("Destructing internal plugin manager before deinitializing it.\n");
+  deinitialize();
+}
+
+bool MPIManagerTy::initialize() {
+  if (IsInitialized) {
+    REPORT("Trying to initialize MPI plugin manager twice.\n");
+    return false;
+  }
+
+  if (!EventSystem.initialize())
+    return false;
+
   const int NumWorkers = EventSystem.getNumWorkers();
 
   // Set function entries
@@ -110,18 +127,34 @@ MPIManagerTy::MPIManagerTy() : EventSystem() {
       MemoryManagers.emplace_back(std::make_unique<MemoryManagerTy>(
           ProcessAllocators[i], ManagerThreshold));
   }
+
+  IsInitialized = true;
+
+  return true;
 }
 
-MPIManagerTy::~MPIManagerTy() {
-  // Close dynamic libraries
+bool MPIManagerTy::deinitialize() {
+  if (!IsInitialized) {
+    REPORT("Trying to deinitialize MPI plugin manager twice.\n");
+    return false;
+  }
+
+  // Close dynamic libraries.
   for (auto &Lib : DynLibs) {
     if (Lib.DynLib->isValid())
       remove(Lib.FileName.c_str());
   }
 
-  // Destruct memory managers
+  // Destruct memory managers.
   for (auto &m : MemoryManagers)
     m.release();
+
+  if (!EventSystem.deinitialize())
+    return false;
+
+  IsInitialized = false;
+
+  return true;
 }
 
 void MPIManagerTy::createOffloadTable(
@@ -159,7 +192,8 @@ __tgt_target_table *MPIManagerTy::getOffloadEntriesTableOnWorker() {
   return getOffloadEntriesTable(0);
 }
 
-void MPIManagerTy::registerLib(__tgt_bin_desc *Desc) {
+// TODO: Replace worker by device.
+void MPIManagerTy::registerLibOnWorker(__tgt_bin_desc *Desc) {
   // Register the images with the RTLs that understand them, if any.
   for (int32_t I = 0; I < Desc->NumDeviceImages; ++I) {
     __tgt_device_image *Img = &Desc->DeviceImages[I];
@@ -482,7 +516,7 @@ void MPIManagerTy::runDeviceMain(__tgt_bin_desc *Desc) {
   if (EventSystem.isHead())
     return;
 
-  registerLib(Desc);
+  registerLibOnWorker(Desc);
 
   EventSystem.runGateThread(getOffloadEntriesTableOnWorker());
 

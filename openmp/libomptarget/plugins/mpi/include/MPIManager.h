@@ -42,6 +42,8 @@ struct FuncOrGblEntryTy {
   SmallVector<__tgt_offload_entry> Entries;
 };
 
+// Memory Allocator.
+// ============================================================================
 // TODO: Maybe include that inside MPIProcessManager?
 /// A class responsible for interacting with device native runtime library to
 /// allocate and free memory.
@@ -59,6 +61,8 @@ public:
   int free(void *TargetPtr, TargetAllocTy Kind = TARGET_ALLOC_DEFAULT) override;
 };
 
+// MPI Manager.
+// ============================================================================
 // TODO: Make not copyable nor movable. Singleton?
 /// Class containing all the device information.
 class MPIManagerTy {
@@ -83,18 +87,34 @@ class MPIManagerTy {
   std::list<DynLibTy> DynLibs{};
   SmallVector<std::list<FuncOrGblEntryTy>> FuncGblEntries{};
 
-public:
-  MPIManagerTy();
+  // TODO: Use atomic and query for it when setting.
+  bool IsInitialized = false;
 
+  // De/initialization functions.
+  // ===========================================================================
+public:
+  MPIManagerTy(){};
   ~MPIManagerTy();
+
+  bool initialize();
+  bool deinitialize();
 
   // Dynamic library loading and handling.
   // ===========================================================================
-  // Record entry point associated with device.
+public:
+  // Load a binary into a device context.
+  __tgt_target_table *loadBinary(const int DeviceId,
+                                 const __tgt_device_image *Image);
+
+  // Check whether is given binary valid for the plugin.
+  int32_t isValidBinary(__tgt_device_image *Image) const;
+
+private:
+  // Record entry point associated with a device.
   void createOffloadTable(int32_t DeviceId,
                           SmallVector<__tgt_offload_entry> &&Entries);
 
-  // Return true if the entry is associated with device.
+  // Return true if the entry is associated with the device.
   bool findOffloadEntry(int32_t DeviceId, void *Addr);
 
   // Return the pointer to the target entries table.
@@ -103,25 +123,21 @@ public:
   // Return the pointer to the target entries table.
   __tgt_target_table *getOffloadEntriesTableOnWorker();
 
-  // Register the shared library to the current device
-  void registerLib(__tgt_bin_desc *Desc);
-
-  // Check whether is given binary is valid for the device
-  int32_t isValidBinary(__tgt_device_image *Image) const;
-
-  __tgt_target_table *loadBinary(const int DeviceId,
-                                 const __tgt_device_image *Image);
+  // Register the shared library to the current device.
+  void registerLibOnWorker(__tgt_bin_desc *Desc);
 
   __tgt_target_table *loadBinaryOnWorker(const __tgt_device_image *Image);
 
-  // Devices number and ids functions
+  // Plugin and device information.
   // ===========================================================================
+public:
   bool isValidDeviceId(const int DeviceId) const;
 
   int getNumOfDevices() const;
 
-  // Valid check helpers
+  // Valid check helpers.
   // ===========================================================================
+private:
   bool checkValidDeviceId(const int DeviceId) const;
 
   bool checkValidAsyncInfo(const __tgt_async_info *AsyncInfo) const;
@@ -130,8 +146,9 @@ public:
 
   bool checkRecordedEventPtr(const void *Event) const;
 
-  // Data management
+  // Data management.
   // ===========================================================================
+public:
   void *dataAlloc(int32_t DeviceId, int64_t Size, void *HostPtr,
                   TargetAllocTy Kind);
 
@@ -146,14 +163,19 @@ public:
   int32_t dataExchange(int32_t SrcID, void *SrcPtr, int32_t DstId, void *DstPtr,
                        int64_t Size, __tgt_async_info *AsyncInfo);
 
-  // Target execution
+  // Target execution.
   // ===========================================================================
+public:
   int32_t runTargetRegion(int32_t DeviceId, void *Entry, void **Args,
                           ptrdiff_t *Offsets, int32_t NumArgs,
                           __tgt_async_info *AsyncInfo);
 
-  // Event queueing and synchronization
+  // Event queueing and synchronization.
   // ===========================================================================
+public:
+  int32_t synchronize(int32_t DeviceId, __tgt_async_info *AsyncInfo);
+
+private:
   // Acquire the async context from the async info object. If no context is
   // present, a new one is created.
   EventQueue *getEventQueue(__tgt_async_info *AsyncInfo);
@@ -162,17 +184,18 @@ public:
   // context.
   void pushNewEvent(const EventPtr &Event, __tgt_async_info *AsyncInfo);
 
-  int32_t synchronize(int32_t DeviceId, __tgt_async_info *AsyncInfo);
-
   // Device side functions.
   // ===========================================================================
+public:
+  // Return true if currently being executed inside the device.
   bool isInsideDevice();
 
-  // Start device main for worker ranks
+  // Start device main for worker ranks.
   void runDeviceMain(__tgt_bin_desc *Desc);
 
-  // External events management
+  // External events management.
   // ===========================================================================
+public:
   // Allocates a shared pointer to an event.
   int32_t createEvent(int32_t DeviceId, void **Event);
 
