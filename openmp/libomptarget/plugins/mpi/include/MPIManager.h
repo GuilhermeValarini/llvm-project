@@ -28,48 +28,43 @@
 using DynamicLibrary = llvm::sys::DynamicLibrary;
 template <typename T> using SmallVector = llvm::SmallVector<T>;
 
-// TODO: Maybe include that inside MPIProcessManager?
-/// Array of Dynamic libraries loaded for this target.
-struct DynLibTy {
-  std::string FileName;
-  std::unique_ptr<DynamicLibrary> DynLib;
-};
-
-// TODO: Maybe include that inside MPIProcessManager?
-/// Keep entries table per device.
-struct FuncOrGblEntryTy {
-  __tgt_target_table Table;
-  SmallVector<__tgt_offload_entry> Entries;
-};
-
-// Memory Allocator.
-// ============================================================================
-// TODO: Maybe include that inside MPIProcessManager?
-/// A class responsible for interacting with device native runtime library to
-/// allocate and free memory.
-class MPIDeviceAllocatorTy : public DeviceAllocatorTy {
-  const int DeviceId;
-  EventSystemTy &EventSystem;
-
-public:
-  MPIDeviceAllocatorTy(int DeviceId, EventSystemTy &EventSystem)
-      : DeviceId(DeviceId), EventSystem(EventSystem) {}
-
-  void *allocate(size_t Size, void *HostPtr,
-                 TargetAllocTy Kind = TARGET_ALLOC_DEFAULT) override;
-
-  int free(void *TargetPtr, TargetAllocTy Kind = TARGET_ALLOC_DEFAULT) override;
-};
-
 // MPI Manager.
 // ============================================================================
-// TODO: Make not copyable nor movable. Singleton?
 /// Class containing all the device information.
 class MPIManagerTy {
+  /// Array of Dynamic libraries loaded for this target.
+  struct DynLibTy {
+    std::string FileName;
+    std::unique_ptr<DynamicLibrary> DynLib;
+  };
+
+  /// Keep entries table per device.
+  struct FuncOrGblEntryTy {
+    __tgt_target_table Table;
+    SmallVector<__tgt_offload_entry> Entries;
+  };
+
+  // Memory Allocator.
+  // ============================================================================
+  /// A class responsible for interacting with device native runtime library to
+  /// allocate and free memory.
+  class MPIDeviceAllocatorTy : public DeviceAllocatorTy {
+    const int DeviceId;
+    EventSystemTy &EventSystem;
+
+  public:
+    MPIDeviceAllocatorTy(int DeviceId, EventSystemTy &EventSystem)
+        : DeviceId(DeviceId), EventSystem(EventSystem) {}
+
+    void *allocate(size_t Size, void *HostPtr,
+                   TargetAllocTy Kind = TARGET_ALLOC_DEFAULT) override;
+
+    int free(void *TargetPtr,
+             TargetAllocTy Kind = TARGET_ALLOC_DEFAULT) override;
+  };
+
   // Distributed event system responsible for hiding communications between
   // nodes.
-  // TODO: Put this on event system file?
-  using EventQueue = SmallVector<EventPtr>;
   EventSystemTy EventSystem;
 
   // Memory manager
@@ -89,6 +84,13 @@ class MPIManagerTy {
 
   // TODO: Use atomic and query for it when setting.
   bool IsInitialized = false;
+
+  // Should be non-copyable and non-movable.
+public:
+  MPIManagerTy(MPIManagerTy &) = delete;
+  MPIManagerTy &operator=(MPIManagerTy &) = delete;
+  MPIManagerTy(MPIManagerTy &&) = delete;
+  MPIManagerTy &operator=(MPIManagerTy &&) = delete;
 
   // De/initialization functions.
   // ===========================================================================
@@ -178,6 +180,7 @@ public:
 private:
   // Acquire the async context from the async info object. If no context is
   // present, a new one is created.
+  using EventQueue = SmallVector<EventPtr>;
   EventQueue *getEventQueue(__tgt_async_info *AsyncInfo);
 
   // Push a new event to the respective device queue, updating the async info
