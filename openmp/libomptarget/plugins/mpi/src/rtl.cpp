@@ -191,7 +191,7 @@ int32_t __tgt_rtl_run_target_team_region(int32_t DeviceId, void *Entry,
                                          void **Args, ptrdiff_t *Offsets,
                                          int32_t NumArgs, int32_t NumTeams,
                                          int32_t ThreadLimit,
-                                         uint64_t LoopTripcount) {
+                                         uint64_t LoopTripCount) {
   return __tgt_rtl_run_target_region(DeviceId, Entry, Args, Offsets, NumArgs);
 }
 
