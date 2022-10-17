@@ -249,16 +249,16 @@ __tgt_target_table *MPIManagerTy::loadBinary(const int DeviceId,
     return nullptr;
   }
 
-  FILE *Ftmp = fdopen(TmpFd, "wb");
+  FILE *TmpFile = fdopen(TmpFd, "wb");
 
-  if (!Ftmp) {
+  if (!TmpFile) {
     REPORT("Failed to load binary. Failed to open new temporary file %s.\n",
            TmpName);
     return nullptr;
   }
 
-  fwrite(Image->ImageStart, ImageSize, 1, Ftmp);
-  fclose(Ftmp);
+  fwrite(Image->ImageStart, ImageSize, 1, TmpFile);
+  fclose(TmpFile);
 
   std::string ErrMsg;
   auto DynLib = std::make_unique<DynamicLibrary>(
