@@ -48,11 +48,20 @@ static int32_t syncCall(FuncTy Function, int32_t DeviceId, ArgsTys &&...Args) {
 extern "C" {
 #endif
 
+// De/initialization functions.
+// =============================================================================
+
 int32_t __tgt_rtl_init_plugin() {
   MPIManager = new MPIManagerTy();
 
   if (!MPIManager) {
-    REPORT("Failed to initialize the MPI plugin\n");
+    REPORT("Failed to allocate MPI plugin manager.\n");
+    return OFFLOAD_FAIL;
+  }
+
+  if (!MPIManager->initialize()) {
+    REPORT("Failed to initialize the MPI plugin.\n");
+    delete MPIManager;
     return OFFLOAD_FAIL;
   }
 
@@ -61,54 +70,66 @@ int32_t __tgt_rtl_init_plugin() {
 
 int32_t __tgt_rtl_deinit_plugin() {
   if (!MPIManager) {
-    REPORT("Failed to deinitialize the MPI plugin. It was never successfully "
-           "initialized before.\n");
+    DP("MPI plugin is not initialized. Deinitialization will do nothing.\n");
     return OFFLOAD_FAIL;
+  }
+
+  int32_t Ret = OFFLOAD_SUCCESS;
+
+  if (!MPIManager->deinitialize()) {
+    REPORT("Failed to deinitialize the MPI plugin.\n");
+    Ret = OFFLOAD_FAIL;
   }
 
   delete MPIManager;
   MPIManager = nullptr;
 
-  return OFFLOAD_SUCCESS;
+  return Ret;
 }
 
-int32_t __tgt_rtl_number_of_devices() { return MPIManager->getNumOfDevices(); }
+int32_t __tgt_rtl_init_device(int32_t DeviceId) { return OFFLOAD_SUCCESS; }
+
+int32_t __tgt_rtl_deinit_device(int32_t DeviceId) { return OFFLOAD_SUCCESS; }
+
+// Dynamic library loading and handling.
+// =============================================================================
 
 int32_t __tgt_rtl_is_valid_binary(__tgt_device_image *Image) {
   return MPIManager->isValidBinary(Image);
 }
-
-// TODO: Check if we should implement this function as well.
-// int32_t __tgt_rtl_is_valid_binary_info(__tgt_device_image *Image,
-//                                        __tgt_image_info *Info);
-
-int32_t __tgt_rtl_is_data_exchangable(int32_t SrcDevId, int32_t DstDevId) {
-  return MPIManager->isValidDeviceId(SrcDevId) &&
-         MPIManager->isValidDeviceId(DstDevId);
-}
-
-// TODO: Check if we support this.
-int32_t __tgt_rtl_supports_empty_images() { return false; }
-
-// TODO: What could we use this for.
-int64_t __tgt_rtl_init_requires(int64_t RequiresFlags) {
-  return OFFLOAD_SUCCESS;
-}
-
-// TODO: What could we use this for.
-int32_t __tgt_rtl_init_device(int32_t DeviceId) { return OFFLOAD_SUCCESS; }
-
-// TODO: What could we use this for.
-int32_t __tgt_rtl_deinit_device(int32_t DeviceId) { return OFFLOAD_SUCCESS; }
 
 __tgt_target_table *__tgt_rtl_load_binary(int32_t DeviceId,
                                           __tgt_device_image *Image) {
   return MPIManager->loadBinary(DeviceId, Image);
 }
 
+// Plugin and device information.
+// =============================================================================
+
+int32_t __tgt_rtl_number_of_devices() { return MPIManager->getNumOfDevices(); }
+
+int32_t __tgt_rtl_is_data_exchangable(int32_t SrcDevId, int32_t DstDevId) {
+  return MPIManager->isValidDeviceId(SrcDevId) &&
+         MPIManager->isValidDeviceId(DstDevId);
+}
+
+// Plugin and device configuration.
+// =============================================================================
+
+// TODO: check what this could be used for.
+// TODO: Used to control log level
+void __tgt_rtl_set_info_flag(uint32_t) { return; }
+
+// Data management.
+// ===========================================================================
+
 void *__tgt_rtl_data_alloc(int32_t DeviceId, int64_t Size, void *HostPtr,
                            int32_t Kind) {
   return MPIManager->dataAlloc(DeviceId, Size, HostPtr, (TargetAllocTy)Kind);
+}
+
+int32_t __tgt_rtl_data_delete(int32_t DeviceId, void *TargetPtr, int32_t Kind) {
+  return MPIManager->dataDelete(DeviceId, TargetPtr, (TargetAllocTy)Kind);
 }
 
 int32_t __tgt_rtl_data_submit(int32_t DeviceId, void *TargetPtr, void *HostPtr,
@@ -117,10 +138,10 @@ int32_t __tgt_rtl_data_submit(int32_t DeviceId, void *TargetPtr, void *HostPtr,
                   Size);
 }
 
-int32_t __tgt_rtl_data_submit_async(int32_t device_id, void *tgt_ptr,
-                                    void *hst_ptr, int64_t size,
-                                    __tgt_async_info *async_info) {
-  return MPIManager->dataSubmit(device_id, tgt_ptr, hst_ptr, size, async_info);
+int32_t __tgt_rtl_data_submit_async(int32_t DeviceId, void *TargetPtr,
+                                    void *HostPtr, int64_t Size,
+                                    __tgt_async_info *AsyncInfo) {
+  return MPIManager->dataSubmit(DeviceId, TargetPtr, HostPtr, Size, AsyncInfo);
 }
 
 int32_t __tgt_rtl_data_retrieve(int32_t DeviceId, void *HostPtr,
@@ -136,22 +157,21 @@ int32_t __tgt_rtl_data_retrieve_async(int32_t DeviceId, void *HostPtr,
                                   AsyncInfo);
 }
 
-int32_t __tgt_rtl_data_exchange(int32_t SrcID, void *SrcPtr, int32_t DstID,
+int32_t __tgt_rtl_data_exchange(int32_t SrcId, void *SrcPtr, int32_t DstId,
                                 void *DstPtr, int64_t Size) {
-  return syncCall(&MPIManagerTy::dataExchange, SrcID, SrcPtr, DstID, DstPtr,
+  return syncCall(&MPIManagerTy::dataExchange, SrcId, SrcPtr, DstId, DstPtr,
                   Size);
 }
 
-int32_t __tgt_rtl_data_exchange_async(int32_t SrcID, void *SrcPtr,
-                                      int32_t DstID, void *DstPtr, int64_t Size,
+int32_t __tgt_rtl_data_exchange_async(int32_t SrcId, void *SrcPtr,
+                                      int32_t DstId, void *DstPtr, int64_t Size,
                                       __tgt_async_info *AsyncInfo) {
-  return MPIManager->dataExchange(SrcID, SrcPtr, DstID, DstPtr, Size,
+  return MPIManager->dataExchange(SrcId, SrcPtr, DstId, DstPtr, Size,
                                   AsyncInfo);
 }
 
-int32_t __tgt_rtl_data_delete(int32_t DeviceId, void *TargetPtr, int32_t Kind) {
-  return MPIManager->dataDelete(DeviceId, TargetPtr, (TargetAllocTy)Kind);
-}
+// Target execution.
+// ===========================================================================
 
 int32_t __tgt_rtl_run_target_region(int32_t DeviceId, void *Entry, void **Args,
                                     ptrdiff_t *Offsets, int32_t NumArgs) {
@@ -178,18 +198,20 @@ int32_t __tgt_rtl_run_target_team_region(int32_t DeviceId, void *Entry,
 int32_t __tgt_rtl_run_target_team_region_async(
     int32_t DeviceId, void *Entry, void **Args, ptrdiff_t *Offsets,
     int32_t NumArgs, int32_t NumTeams, int32_t ThreadLimit,
-    uint64_t LoopTripcount, __tgt_async_info *AsyncInfo) {
+    uint64_t LoopTripCount, __tgt_async_info *AsyncInfo) {
   return __tgt_rtl_run_target_region_async(DeviceId, Entry, Args, Offsets,
                                            NumArgs, AsyncInfo);
 }
+
+// Asynchronous context management.
+// ===========================================================================
 
 int32_t __tgt_rtl_synchronize(int32_t DeviceId, __tgt_async_info *AsyncInfo) {
   return MPIManager->synchronize(DeviceId, AsyncInfo);
 }
 
-// TODO: check what this could be used for.
-// TODO: Used to control log level
-void __tgt_rtl_set_info_flag(uint32_t) { return; }
+// External events management.
+// ===========================================================================
 
 int32_t __tgt_rtl_create_event(int32_t DeviceId, void **Event) {
   return MPIManager->createEvent(DeviceId, Event);
@@ -212,6 +234,9 @@ int32_t __tgt_rtl_sync_event(int32_t DeviceId, void *Event) {
 int32_t __tgt_rtl_destroy_event(int32_t DeviceId, void *Event) {
   return MPIManager->destroyEvent(DeviceId, Event);
 }
+
+// Device side operations.
+// ===========================================================================
 
 int32_t __tgt_rtl_is_inside_device() { return MPIManager->isInsideDevice(); }
 
