@@ -215,6 +215,12 @@ public:
 
   /// Synchronize all pending actions.
   ///
+  /// \note synchronization will be performance in a blocking or non-blocking
+  /// manner, depending on the SyncType.
+  ///
+  /// \note if the operations are completed, the registered post-processing
+  /// functions will be executed.
+  ///
   /// \returns OFFLOAD_FAIL or OFFLOAD_SUCCESS appropriately.
   int synchronize();
 
@@ -223,6 +229,9 @@ public:
   void *&getVoidPtrLocation();
 
   /// Check if all asynchronous operations are completed.
+  ///
+  /// \note if the operations are completed, the registered post-processing
+  /// functions will be executed.
   ///
   /// \returns true if there is no pending asynchronous operations, false
   /// otherwise.
@@ -239,6 +248,18 @@ public:
                   "function signature!");
     PostProcessingFunctions.emplace_back(Function);
   }
+
+private:
+  /// Run all the post-processing functions sequentially.
+  ///
+  /// \returns OFFLOAD_FAIL if any post-processing function failed,
+  /// OFFLOAD_SUCCESS otherwise.
+  int32_t runPostProcessing();
+
+  /// Check if the internal asynchronous info queue is empty or not.
+  ///
+  /// \returns true if empty, false otherwise.
+  bool isQueueEmpty();
 };
 
 /// This struct is a record of non-contiguous information

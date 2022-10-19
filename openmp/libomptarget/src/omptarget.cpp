@@ -40,14 +40,8 @@ int AsyncInfoTy::synchronize() {
   }
 
   // Run any pending post-processing function registered on this async object.
-  if (Result == OFFLOAD_SUCCESS && isDone()) {
-    for (auto &PostProcFunc : PostProcessingFunctions) {
-      Result = PostProcFunc();
-      if (Result != OFFLOAD_SUCCESS)
-        break;
-    }
-    PostProcessingFunctions.clear();
-  }
+  if (Result == OFFLOAD_SUCCESS && isQueueEmpty())
+    Result = runPostProcessing();
 
   return Result;
 }
@@ -57,8 +51,37 @@ void *&AsyncInfoTy::getVoidPtrLocation() {
   return BufferLocations.back();
 }
 
-// TODO: Should be able to be called in a standalone way.
-bool AsyncInfoTy::isDone() { return AsyncInfo.Queue == nullptr; }
+bool AsyncInfoTy::isDone() {
+  // If queue is not empty, we should query for its completion.
+  if (!isQueueEmpty())
+    Device.queryAsync(*this);
+
+  // After the query, if the queue is empty, we must run the post-processing
+  // functions.
+  if (isQueueEmpty())
+    runPostProcessing();
+
+  // Post-processing functions can enqueue more operations, thus we return true
+  // only if the queue is still empty after post-processing.
+  return isQueueEmpty();
+}
+
+int32_t AsyncInfoTy::runPostProcessing() {
+  // Clear the post processing functions and ready the struct vector to receive
+  // new procedures from the post processing functions themselves.
+  SmallVector<PostProcFuncTy> Functions(
+      std::move(PostProcessingFunctions));
+
+  for (auto &Func : Functions) {
+    const int Result = Func();
+    if (Result != OFFLOAD_SUCCESS)
+      return Result;
+  }
+
+  return OFFLOAD_SUCCESS;
+}
+
+bool AsyncInfoTy::isQueueEmpty() { return AsyncInfo.Queue == nullptr; }
 
 /* All begin addresses for partially mapped structs must be 8-aligned in order
  * to ensure proper alignment of members. E.g.

@@ -384,8 +384,6 @@ EXTERN void __tgt_target_nowait_query(void **AsyncHandle) {
 
   auto AsyncInfo = (AsyncInfoTy *)*AsyncHandle;
 
-  AsyncInfo->synchronize();
-
   // If the are device operations still pending, return immediately without
   // deallocating the handle.
   if (!AsyncInfo->isDone())
