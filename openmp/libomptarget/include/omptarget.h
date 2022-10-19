@@ -382,6 +382,16 @@ int __tgt_target_kernel_nowait(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
                                void *DepList, int32_t NoAliasDepNum,
                                void *NoAliasDepList);
 
+// Non-blocking synchronization for target nowait regions. This function
+// acquires the asynchronous context from task data of the current task being
+// executed and tries to query for the completion of its operations. If the
+// operations are still pending, the function returns immediately. If the
+// operations are completed, all the post-processing procedures stored in the
+// asynchronous context are executed and the context is removed from the task
+// data. The function returns 0 if it was able to query for the nowait execution
+// and a value different than zero otherwise.
+void __tgt_target_nowait_query(void **AsyncHandle);
+
 void __tgt_set_info_flag(uint32_t);
 
 int __tgt_print_device_info(int64_t DeviceId);

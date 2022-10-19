@@ -61,13 +61,11 @@ EXTERN void __tgt_unregister_lib(__tgt_bin_desc *Desc) {
   }
 }
 
-static inline void
-targetDataMapper(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
-                 int32_t ArgNum, void **ArgsBase, void **Args,
-                 int64_t *ArgSizes, int64_t *ArgTypes, map_var_info_t *ArgNames,
-                 void **ArgMappers, AsyncInfoTy &AsyncInfo,
-                 TargetDataFuncPtrTy TargetDataFunction,
-                 const char *RegionTypeMsg, bool Dispatch = true) {
+static inline void targetDataMapper(
+    ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t ArgNum,
+    void **ArgsBase, void **Args, int64_t *ArgSizes, int64_t *ArgTypes,
+    map_var_info_t *ArgNames, void **ArgMappers, AsyncInfoTy &AsyncInfo,
+    TargetDataFuncPtrTy TargetDataFunction, const char *RegionTypeMsg) {
   TIMESCOPE_WITH_IDENT(Loc);
 
   if (getInfoLevel() & OMP_INFOTYPE_KERNEL_ARGS)
@@ -83,10 +81,9 @@ targetDataMapper(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
 #endif
 
   int Rc = OFFLOAD_SUCCESS;
-  if (Dispatch)
-    Rc = TargetDataFunction(Loc, Device, ArgNum, ArgsBase, Args, ArgSizes,
-                            ArgTypes, ArgNames, ArgMappers, AsyncInfo,
-                            false /* FromMapper */);
+  Rc = TargetDataFunction(Loc, Device, ArgNum, ArgsBase, Args, ArgSizes,
+                          ArgTypes, ArgNames, ArgMappers, AsyncInfo,
+                          false /* FromMapper */);
 
   if (Rc == OFFLOAD_SUCCESS)
     Rc = AsyncInfo.synchronize();
@@ -138,10 +135,10 @@ EXTERN void __tgt_target_data_begin_nowait_mapper(
 
   DeviceTy &Device = *PM->Devices[DeviceId];
 
-  TaskAsyncInfoTy AsyncInfo(Device);
+  TaskAsyncInfoWrapperTy AsyncInfo(Device);
   targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, *AsyncInfo, targetDataBegin,
-                   "Entering OpenMP data region", AsyncInfo.shouldDispatch());
+                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataBegin,
+                   "Entering OpenMP data region");
 }
 
 /// passes data from the target, releases target memory and destroys
@@ -188,10 +185,10 @@ EXTERN void __tgt_target_data_end_nowait_mapper(
 
   DeviceTy &Device = *PM->Devices[DeviceId];
 
-  TaskAsyncInfoTy AsyncInfo(Device);
+  TaskAsyncInfoWrapperTy AsyncInfo(Device);
   targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, *AsyncInfo, targetDataEnd,
-                   "Exiting OpenMP data region", AsyncInfo.shouldDispatch());
+                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataEnd,
+                   "Exiting OpenMP data region");
 }
 
 EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
@@ -235,16 +232,16 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
 
   DeviceTy &Device = *PM->Devices[DeviceId];
 
-  TaskAsyncInfoTy AsyncInfo(Device);
+  TaskAsyncInfoWrapperTy AsyncInfo(Device);
   targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, *AsyncInfo, targetDataUpdate,
-                   "Updating OpenMP data", AsyncInfo.shouldDispatch());
+                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataUpdate,
+                   "Updating OpenMP data");
 }
 
 static inline int targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
                                int32_t NumTeams, int32_t ThreadLimit,
                                void *HostPtr, __tgt_kernel_arguments *Args,
-                               AsyncInfoTy &AsyncInfo, bool Dispatch = true) {
+                               AsyncInfoTy &AsyncInfo) {
   TIMESCOPE_WITH_IDENT(Loc);
 
   if (Args->Version != 1) {
@@ -271,11 +268,10 @@ static inline int targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
     NumTeams = 0;
 
   int Rc = OFFLOAD_SUCCESS;
-  if (Dispatch)
-    Rc = target(Loc, Device, HostPtr, Args->NumArgs, Args->ArgBasePtrs,
-                Args->ArgPtrs, Args->ArgSizes, Args->ArgTypes, Args->ArgNames,
-                Args->ArgMappers, NumTeams, ThreadLimit, Args->Tripcount,
-                IsTeams, AsyncInfo);
+  Rc = target(Loc, Device, HostPtr, Args->NumArgs, Args->ArgBasePtrs,
+              Args->ArgPtrs, Args->ArgSizes, Args->ArgTypes, Args->ArgNames,
+              Args->ArgMappers, NumTeams, ThreadLimit, Args->Tripcount, IsTeams,
+              AsyncInfo);
 
   if (Rc == OFFLOAD_SUCCESS)
     Rc = AsyncInfo.synchronize();
@@ -335,9 +331,9 @@ EXTERN int __tgt_target_kernel_nowait(
 
   DeviceTy &Device = *PM->Devices[DeviceId];
 
-  TaskAsyncInfoTy AsyncInfo(Device);
+  TaskAsyncInfoWrapperTy AsyncInfo(Device);
   return targetKernel(Loc, Device, DeviceId, NumTeams, ThreadLimit, HostPtr,
-                      Args, *AsyncInfo, AsyncInfo.shouldDispatch());
+                      Args, AsyncInfo);
 }
 
 // Get the current number of components for a user-defined mapper.
@@ -377,4 +373,25 @@ EXTERN void __tgt_set_info_flag(uint32_t NewInfoLevel) {
 EXTERN int __tgt_print_device_info(int64_t DeviceId) {
   return PM->Devices[DeviceId]->printDeviceInfo(
       PM->Devices[DeviceId]->RTLDeviceID);
+}
+
+EXTERN void __tgt_target_nowait_query(void **AsyncHandle) {
+  if (!AsyncHandle || !*AsyncHandle) {
+    REPORT("Receive an invalid async handle from the current OpenMP task. Is "
+           "this a target nowait region?\n");
+    handleTargetOutcome(false, nullptr);
+  }
+
+  auto AsyncInfo = (AsyncInfoTy *)*AsyncHandle;
+
+  AsyncInfo->synchronize();
+
+  // If the are device operations still pending, return immediately without
+  // deallocating the handle.
+  if (!AsyncInfo->isDone())
+    return;
+
+  // Delete the handle and unset it from the OpenMP task data.
+  delete AsyncInfo;
+  *AsyncHandle = nullptr;
 }

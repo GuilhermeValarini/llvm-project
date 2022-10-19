@@ -195,14 +195,13 @@ printKernelArguments(const ident_t *Loc, const int64_t DeviceId,
   }
 }
 
-class TaskAsyncInfoTy {
+class TaskAsyncInfoWrapperTy {
   const int ExecThreadID = KMP_GTID_DNE;
   AsyncInfoTy LocalAsyncInfo;
   AsyncInfoTy *AsyncInfo = &LocalAsyncInfo;
-  bool IsNew = true;
 
 public:
-  TaskAsyncInfoTy(DeviceTy &Device)
+  TaskAsyncInfoWrapperTy(DeviceTy &Device)
       : ExecThreadID(__kmpc_global_thread_num(NULL)), LocalAsyncInfo(Device) {
     // If we failed to acquired the current global thread id, we cannot
     // re-enqueue the current task. Thus we should use the local blocking async
@@ -221,10 +220,8 @@ public:
     AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(ExecThreadID);
 
     // If a valid AsyncInfo was acquired, use it.
-    if (AsyncInfo) {
-      IsNew = false;
+    if (AsyncInfo)
       return;
-    }
 
     // If no valid async handle is present, a new AsyncInfo will be allocated
     // and stored in the current task.
@@ -232,35 +229,7 @@ public:
     __kmpc_omp_set_target_async_handle(ExecThreadID, (void *)AsyncInfo);
   }
 
-  ~TaskAsyncInfoTy() {
-    // We should always have a valid async info pointer at this point.
-    assert(AsyncInfo);
-
-    // If the async info is still pending, return immediately without
-    // deallocating it. It will be handled afterwards when the current thread is
-    // re-enqueued.
-    if (!AsyncInfo->isDone())
-      return;
-
-    // If we used the local AsyncInfo, we can return immediately since we did
-    // not allocated one handle at the task data.
-    if (AsyncInfo == &LocalAsyncInfo)
-      return;
-
-    // If the async info is completed, deleted the handle and remove it from the
-    // task data.
-    delete AsyncInfo;
-    __kmpc_omp_set_target_async_handle(ExecThreadID, NULL);
-  }
-
-  AsyncInfoTy &operator*() { return *AsyncInfo; }
-
-  /// Return if the device side operations should be dispatched or not. When the
-  /// async info attached to the task struct was just created, the target region
-  /// operations must be dispatched and accumulated on the internal AsyncInfo.
-  /// Otherwise, the operations were already dispatched before and only
-  /// synchronization is needed.
-  bool shouldDispatch() { return IsNew; }
+  operator AsyncInfoTy&() { return *AsyncInfo; }
 };
 
 #include "llvm/Support/TimeProfiler.h"
