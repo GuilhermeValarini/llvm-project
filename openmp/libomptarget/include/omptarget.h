@@ -185,6 +185,10 @@ struct DeviceTy;
 /// associated with a libomptarget layer device. RAII semantics to avoid
 /// mistakes.
 class AsyncInfoTy {
+public:
+  enum class SyncTypeTy { BLOCKING, NON_BLOCKING };
+
+private:
   /// Locations we used in (potentially) asynchronous calls which should live
   /// as long as this AsyncInfoTy object.
   std::deque<void *> BufferLocations;
@@ -198,13 +202,11 @@ class AsyncInfoTy {
   __tgt_async_info AsyncInfo;
   DeviceTy &Device;
 
-public:
-  enum class SyncTypeTy {
-    BLOCKING,
-    NON_BLOCKING
-  };
+  SyncTypeTy SyncType;
 
-  AsyncInfoTy(DeviceTy &Device) : Device(Device) {}
+public:
+  AsyncInfoTy(DeviceTy &Device, SyncTypeTy SyncType = SyncTypeTy::BLOCKING)
+      : Device(Device), SyncType(SyncType) {}
   ~AsyncInfoTy() { synchronize(); }
 
   /// Implicit conversion to the __tgt_async_info which is used in the
@@ -214,7 +216,7 @@ public:
   /// Synchronize all pending actions.
   ///
   /// \returns OFFLOAD_FAIL or OFFLOAD_SUCCESS appropriately.
-  int synchronize(SyncTypeTy SyncType = SyncTypeTy::BLOCKING);
+  int synchronize();
 
   /// Return a void* reference with a lifetime that is at least as long as this
   /// AsyncInfoTy object. The location can be used as intermediate buffer.
@@ -231,8 +233,7 @@ public:
   /// \param[in] Function is a templated function (e.g., function pointers,
   /// lambdas, std::function) that can be convertible to a PostProcFuncTy (i.e.,
   /// it must have int() as its function signature).
-  template<typename FuncTy>
-  void addPostProcessingFunction(FuncTy &&Function) {
+  template <typename FuncTy> void addPostProcessingFunction(FuncTy &&Function) {
     static_assert(std::is_convertible_v<FuncTy, PostProcFuncTy>,
                   "Invalid post-processing function type. Please check "
                   "function signature!");

@@ -61,13 +61,13 @@ EXTERN void __tgt_unregister_lib(__tgt_bin_desc *Desc) {
   }
 }
 
-static inline void targetDataMapper(
-    ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t ArgNum,
-    void **ArgsBase, void **Args, int64_t *ArgSizes, int64_t *ArgTypes,
-    map_var_info_t *ArgNames, void **ArgMappers, AsyncInfoTy &AsyncInfo,
-    TargetDataFuncPtrTy TargetDataFunction, const char *RegionTypeMsg,
-    AsyncInfoTy::SyncTypeTy SyncType = AsyncInfoTy::SyncTypeTy::BLOCKING,
-    bool Dispatch = true) {
+static inline void
+targetDataMapper(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
+                 int32_t ArgNum, void **ArgsBase, void **Args,
+                 int64_t *ArgSizes, int64_t *ArgTypes, map_var_info_t *ArgNames,
+                 void **ArgMappers, AsyncInfoTy &AsyncInfo,
+                 TargetDataFuncPtrTy TargetDataFunction,
+                 const char *RegionTypeMsg, bool Dispatch = true) {
   TIMESCOPE_WITH_IDENT(Loc);
 
   if (getInfoLevel() & OMP_INFOTYPE_KERNEL_ARGS)
@@ -89,7 +89,7 @@ static inline void targetDataMapper(
                             false /* FromMapper */);
 
   if (Rc == OFFLOAD_SUCCESS)
-    Rc = AsyncInfo.synchronize(SyncType);
+    Rc = AsyncInfo.synchronize();
 
   handleTargetOutcome(Rc == OFFLOAD_SUCCESS, Loc);
 }
@@ -141,8 +141,7 @@ EXTERN void __tgt_target_data_begin_nowait_mapper(
   TaskAsyncInfoTy AsyncInfo(Device);
   targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
                    ArgTypes, ArgNames, ArgMappers, *AsyncInfo, targetDataBegin,
-                   "Entering OpenMP data region", AsyncInfo.getSyncType(),
-                   AsyncInfo.shouldDispatch());
+                   "Entering OpenMP data region", AsyncInfo.shouldDispatch());
 }
 
 /// passes data from the target, releases target memory and destroys
@@ -192,8 +191,7 @@ EXTERN void __tgt_target_data_end_nowait_mapper(
   TaskAsyncInfoTy AsyncInfo(Device);
   targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
                    ArgTypes, ArgNames, ArgMappers, *AsyncInfo, targetDataEnd,
-                   "Exiting OpenMP data region", AsyncInfo.getSyncType(),
-                   AsyncInfo.shouldDispatch());
+                   "Exiting OpenMP data region", AsyncInfo.shouldDispatch());
 }
 
 EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
@@ -240,16 +238,13 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
   TaskAsyncInfoTy AsyncInfo(Device);
   targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
                    ArgTypes, ArgNames, ArgMappers, *AsyncInfo, targetDataUpdate,
-                   "Updating OpenMP data", AsyncInfo.getSyncType(),
-                   AsyncInfo.shouldDispatch());
+                   "Updating OpenMP data", AsyncInfo.shouldDispatch());
 }
 
-static inline int targetKernel(
-    ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t NumTeams,
-    int32_t ThreadLimit, void *HostPtr, __tgt_kernel_arguments *Args,
-    AsyncInfoTy &AsyncInfo,
-    AsyncInfoTy::SyncTypeTy SyncType = AsyncInfoTy::SyncTypeTy::BLOCKING,
-    bool Dispatch = true) {
+static inline int targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
+                               int32_t NumTeams, int32_t ThreadLimit,
+                               void *HostPtr, __tgt_kernel_arguments *Args,
+                               AsyncInfoTy &AsyncInfo, bool Dispatch = true) {
   TIMESCOPE_WITH_IDENT(Loc);
 
   if (Args->Version != 1) {
@@ -283,7 +278,7 @@ static inline int targetKernel(
                 IsTeams, AsyncInfo);
 
   if (Rc == OFFLOAD_SUCCESS)
-    Rc = AsyncInfo.synchronize(SyncType);
+    Rc = AsyncInfo.synchronize();
 
   handleTargetOutcome(Rc == OFFLOAD_SUCCESS, Loc);
   assert(Rc == OFFLOAD_SUCCESS && "__tgt_target_kernel unexpected failure!");
@@ -342,8 +337,7 @@ EXTERN int __tgt_target_kernel_nowait(
 
   TaskAsyncInfoTy AsyncInfo(Device);
   return targetKernel(Loc, Device, DeviceId, NumTeams, ThreadLimit, HostPtr,
-                      Args, *AsyncInfo, AsyncInfo.getSyncType(),
-                      AsyncInfo.shouldDispatch());
+                      Args, *AsyncInfo, AsyncInfo.shouldDispatch());
 }
 
 // Get the current number of components for a user-defined mapper.

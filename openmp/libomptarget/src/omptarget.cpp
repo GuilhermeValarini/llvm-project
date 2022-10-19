@@ -22,7 +22,7 @@
 
 using llvm::SmallVector;
 
-int AsyncInfoTy::synchronize(SyncTypeTy SyncType) {
+int AsyncInfoTy::synchronize() {
   int Result = OFFLOAD_SUCCESS;
   if (AsyncInfo.Queue) {
     switch (SyncType) {
@@ -57,6 +57,7 @@ void *&AsyncInfoTy::getVoidPtrLocation() {
   return BufferLocations.back();
 }
 
+// TODO: Should be able to be called in a standalone way.
 bool AsyncInfoTy::isDone() { return AsyncInfo.Queue == nullptr; }
 
 /* All begin addresses for partially mapped structs must be 8-aligned in order
@@ -724,7 +725,7 @@ static void applyToShadowMapEntries(DeviceTy &Device, CBTy CB, void *Begin,
 static int
 postProcessingTargetDataEnd(DeviceTy *Device,
                             SmallVector<PostProcessingInfo> EntriesInfo,
-                            void * FromMapperBase) {
+                            void *FromMapperBase) {
   int Ret = OFFLOAD_SUCCESS;
 
   for (PostProcessingInfo &Info : EntriesInfo) {

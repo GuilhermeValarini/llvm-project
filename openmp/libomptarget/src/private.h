@@ -121,6 +121,8 @@ void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid) __attribute__((weak));
 void __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle)
     __attribute__((weak));
 bool __kmpc_omp_has_task_team(kmp_int32 gtid) __attribute__((weak));
+// Invalid GTID as defined by libomp; keep in sync
+#define KMP_GTID_DNE (-2)
 #ifdef __cplusplus
 }
 #endif
@@ -194,45 +196,64 @@ printKernelArguments(const ident_t *Loc, const int64_t DeviceId,
 }
 
 class TaskAsyncInfoTy {
-  const int ExecThreadID = -1;
-  AsyncInfoTy::SyncTypeTy SyncType = AsyncInfoTy::SyncTypeTy::BLOCKING;
-  AsyncInfoTy *AsyncInfo = nullptr;
-  bool IsNew = false;
+  const int ExecThreadID = KMP_GTID_DNE;
+  AsyncInfoTy LocalAsyncInfo;
+  AsyncInfoTy *AsyncInfo = &LocalAsyncInfo;
+  bool IsNew = true;
 
 public:
   TaskAsyncInfoTy(DeviceTy &Device)
-      : ExecThreadID(__kmpc_global_thread_num(NULL)) {
-    // Acquire the AsyncInfo stored in async handle of the current task being
-    // executed. If no valid async handle is present, a new AsyncInfo is
-    // allocated and stored in the current task.
-    AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(ExecThreadID);
-
-    if (!AsyncInfo) {
-      AsyncInfo = new AsyncInfoTy(Device);
-      __kmpc_omp_set_target_async_handle(ExecThreadID, (void *)AsyncInfo);
-      IsNew = true;
-    }
-
-    // Define the synchronization type based on the current task context. Only
-    // tasks with an assigned task team can be re-enqueue and thus can use the
-    // non-blocking synchronization scheme.
-    if (__kmpc_omp_has_task_team(ExecThreadID))
-      SyncType = AsyncInfoTy::SyncTypeTy::NON_BLOCKING;
-  }
-
-  /// Delete AsyncInfo if it is completed and remove it from the current task
-  /// async handle.
-  ~TaskAsyncInfoTy() {
-    if (!AsyncInfo || !AsyncInfo->isDone())
+      : ExecThreadID(__kmpc_global_thread_num(NULL)), LocalAsyncInfo(Device) {
+    // If we failed to acquired the current global thread id, we cannot
+    // re-enqueue the current task. Thus we should use the local blocking async
+    // info.
+    if (ExecThreadID == KMP_GTID_DNE)
       return;
 
+    // Only tasks with an assigned task team can be re-enqueue and thus can
+    // use the non-blocking synchronization scheme. Thus we should use the local
+    // blocking async info, if we don´t have one.
+    if (__kmpc_omp_has_task_team(ExecThreadID))
+      return;
+
+    // Acquire the AsyncInfo stored in async handle of the current task being
+    // executed.
+    AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(ExecThreadID);
+
+    // If a valid AsyncInfo was acquired, use it.
+    if (AsyncInfo) {
+      IsNew = false;
+      return;
+    }
+
+    // If no valid async handle is present, a new AsyncInfo will be allocated
+    // and stored in the current task.
+    AsyncInfo = new AsyncInfoTy(Device, AsyncInfoTy::SyncTypeTy::NON_BLOCKING);
+    __kmpc_omp_set_target_async_handle(ExecThreadID, (void *)AsyncInfo);
+  }
+
+  ~TaskAsyncInfoTy() {
+    // We should always have a valid async info pointer at this point.
+    assert(AsyncInfo);
+
+    // If the async info is still pending, return immediately without
+    // deallocating it. It will be handled afterwards when the current thread is
+    // re-enqueued.
+    if (!AsyncInfo->isDone())
+      return;
+
+    // If we used the local AsyncInfo, we can return immediately since we did
+    // not allocated one handle at the task data.
+    if (AsyncInfo == &LocalAsyncInfo)
+      return;
+
+    // If the async info is completed, deleted the handle and remove it from the
+    // task data.
     delete AsyncInfo;
     __kmpc_omp_set_target_async_handle(ExecThreadID, NULL);
   }
 
   AsyncInfoTy &operator*() { return *AsyncInfo; }
-
-  AsyncInfoTy::SyncTypeTy getSyncType() { return SyncType; }
 
   /// Return if the device side operations should be dispatched or not. When the
   /// async info attached to the task struct was just created, the target region
