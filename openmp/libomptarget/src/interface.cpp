@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <type_traits>
 
 ////////////////////////////////////////////////////////////////////////////////
 /// adds requires flags
@@ -61,12 +62,25 @@ EXTERN void __tgt_unregister_lib(__tgt_bin_desc *Desc) {
   }
 }
 
-static inline void targetDataMapper(
-    ident_t *Loc, DeviceTy &Device, int64_t DeviceId, int32_t ArgNum,
-    void **ArgsBase, void **Args, int64_t *ArgSizes, int64_t *ArgTypes,
-    map_var_info_t *ArgNames, void **ArgMappers, AsyncInfoTy &AsyncInfo,
-    TargetDataFuncPtrTy TargetDataFunction, const char *RegionTypeMsg) {
+template <typename TargetAsyncInfoTy>
+static inline void
+targetDataMapper(ident_t *Loc, int64_t DeviceId, int32_t ArgNum,
+                 void **ArgsBase, void **Args, int64_t *ArgSizes,
+                 int64_t *ArgTypes, map_var_info_t *ArgNames, void **ArgMappers,
+                 TargetDataFuncPtrTy TargetDataFunction,
+                 const char *RegionTypeMsg, const char *RegionName) {
+  static_assert(std::is_convertible_v<TargetAsyncInfoTy, AsyncInfoTy>,
+                "TargetAsyncInfoTy must be convertible to AsyncInfoTy.");
+
   TIMESCOPE_WITH_IDENT(Loc);
+
+  DP("Entering data %s region for device %" PRId64 " with %d mappings\n",
+     RegionName, DeviceId, ArgNum);
+
+  if (checkDeviceAndCtors(DeviceId, Loc)) {
+    DP("Not offloading to device %" PRId64 "\n", DeviceId);
+    return;
+  }
 
   if (getInfoLevel() & OMP_INFOTYPE_KERNEL_ARGS)
     printKernelArguments(Loc, DeviceId, ArgNum, ArgSizes, ArgTypes, ArgNames,
@@ -79,6 +93,10 @@ static inline void targetDataMapper(
        (ArgNames) ? getNameFromMapping(ArgNames[I]).c_str() : "unknown");
   }
 #endif
+
+  DeviceTy &Device = *PM->Devices[DeviceId];
+  TargetAsyncInfoTy TargetAsyncInfo(Device);
+  AsyncInfoTy &AsyncInfo = TargetAsyncInfo;
 
   int Rc = OFFLOAD_SUCCESS;
   Rc = TargetDataFunction(Loc, Device, ArgNum, ArgsBase, Args, ArgSizes,
@@ -101,21 +119,9 @@ EXTERN void __tgt_target_data_begin_mapper(ident_t *Loc, int64_t DeviceId,
                                            map_var_info_t *ArgNames,
                                            void **ArgMappers) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering data begin region for device %" PRId64 " with %d mappings\n",
-     DeviceId, ArgNum);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  AsyncInfoTy AsyncInfo(Device);
-  targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataBegin,
-                   "Entering OpenMP data region");
+  targetDataMapper<AsyncInfoTy>(Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
+                                ArgTypes, ArgNames, ArgMappers, targetDataBegin,
+                                "Entering OpenMP data region", "begin");
 }
 
 EXTERN void __tgt_target_data_begin_nowait_mapper(
@@ -124,21 +130,9 @@ EXTERN void __tgt_target_data_begin_nowait_mapper(
     void **ArgMappers, int32_t DepNum, void *DepList, int32_t NoAliasDepNum,
     void *NoAliasDepList) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering data begin region for device %" PRId64 " with %d mappings\n",
-     DeviceId, ArgNum);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  TaskAsyncInfoWrapperTy AsyncInfo(Device);
-  targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataBegin,
-                   "Entering OpenMP data region");
+  targetDataMapper<TaskAsyncInfoWrapperTy>(
+      Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
+      ArgMappers, targetDataBegin, "Entering OpenMP data region", "begin");
 }
 
 /// passes data from the target, releases target memory and destroys
@@ -151,21 +145,9 @@ EXTERN void __tgt_target_data_end_mapper(ident_t *Loc, int64_t DeviceId,
                                          map_var_info_t *ArgNames,
                                          void **ArgMappers) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering data end region for device %" PRId64 " with %d mappings\n",
-     DeviceId, ArgNum);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  AsyncInfoTy AsyncInfo(Device);
-  targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataEnd,
-                   "Exiting OpenMP data region");
+  targetDataMapper<AsyncInfoTy>(Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
+                                ArgTypes, ArgNames, ArgMappers, targetDataEnd,
+                                "Exiting OpenMP data region", "end");
 }
 
 EXTERN void __tgt_target_data_end_nowait_mapper(
@@ -174,21 +156,9 @@ EXTERN void __tgt_target_data_end_nowait_mapper(
     void **ArgMappers, int32_t DepNum, void *DepList, int32_t NoAliasDepNum,
     void *NoAliasDepList) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering data end region for device %" PRId64 " with %d mappings\n",
-     DeviceId, ArgNum);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  TaskAsyncInfoWrapperTy AsyncInfo(Device);
-  targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataEnd,
-                   "Exiting OpenMP data region");
+  targetDataMapper<TaskAsyncInfoWrapperTy>(
+      Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
+      ArgMappers, targetDataEnd, "Exiting OpenMP data region", "end");
 }
 
 EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
@@ -198,21 +168,9 @@ EXTERN void __tgt_target_data_update_mapper(ident_t *Loc, int64_t DeviceId,
                                             map_var_info_t *ArgNames,
                                             void **ArgMappers) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering data update region for device %" PRId64 " with %d mappings\n",
-     DeviceId, ArgNum);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  AsyncInfoTy AsyncInfo(Device);
-  targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataUpdate,
-                   "Updating OpenMP data");
+  targetDataMapper<AsyncInfoTy>(
+      Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
+      ArgMappers, targetDataUpdate, "Updating OpenMP data", "update");
 }
 
 EXTERN void __tgt_target_data_update_nowait_mapper(
@@ -221,28 +179,28 @@ EXTERN void __tgt_target_data_update_nowait_mapper(
     void **ArgMappers, int32_t DepNum, void *DepList, int32_t NoAliasDepNum,
     void *NoAliasDepList) {
   TIMESCOPE_WITH_IDENT(Loc);
+  targetDataMapper<TaskAsyncInfoWrapperTy>(
+      Loc, DeviceId, ArgNum, ArgsBase, Args, ArgSizes, ArgTypes, ArgNames,
+      ArgMappers, targetDataUpdate, "Updating OpenMP data", "update");
+}
 
-  DP("Entering data update region for device %" PRId64 " with %d mappings\n",
-     DeviceId, ArgNum);
+template <typename TargetAsyncInfoTy>
+static inline int targetKernel(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
+                               int32_t ThreadLimit, void *HostPtr,
+                               __tgt_kernel_arguments *Args) {
+  static_assert(std::is_convertible_v<TargetAsyncInfoTy, AsyncInfoTy>,
+                "Target AsyncInfoTy must be convertible to AsyncInfoTy.");
+
+  TIMESCOPE_WITH_IDENT(Loc);
+
+  DP("Entering target region for device %" PRId64 " with entry point " DPxMOD
+     "\n",
+     DeviceId, DPxPTR(HostPtr));
 
   if (checkDeviceAndCtors(DeviceId, Loc)) {
     DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return;
+    return OMP_TGT_FAIL;
   }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  TaskAsyncInfoWrapperTy AsyncInfo(Device);
-  targetDataMapper(Loc, Device, DeviceId, ArgNum, ArgsBase, Args, ArgSizes,
-                   ArgTypes, ArgNames, ArgMappers, AsyncInfo, targetDataUpdate,
-                   "Updating OpenMP data");
-}
-
-static inline int targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
-                               int32_t NumTeams, int32_t ThreadLimit,
-                               void *HostPtr, __tgt_kernel_arguments *Args,
-                               AsyncInfoTy &AsyncInfo) {
-  TIMESCOPE_WITH_IDENT(Loc);
 
   if (Args->Version != 1) {
     DP("Unexpected ABI version: %d\n", Args->Version);
@@ -266,6 +224,10 @@ static inline int targetKernel(ident_t *Loc, DeviceTy &Device, int64_t DeviceId,
   bool IsTeams = NumTeams != -1;
   if (!IsTeams)
     NumTeams = 0;
+
+  DeviceTy &Device = *PM->Devices[DeviceId];
+  TargetAsyncInfoTy TargetAsyncInfo(Device);
+  AsyncInfoTy &AsyncInfo = TargetAsyncInfo;
 
   int Rc = OFFLOAD_SUCCESS;
   Rc = target(Loc, Device, HostPtr, Args->NumArgs, Args->ArgBasePtrs,
@@ -297,21 +259,8 @@ EXTERN int __tgt_target_kernel(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
                                int32_t ThreadLimit, void *HostPtr,
                                __tgt_kernel_arguments *Args) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering target region with entry point " DPxMOD " and device Id %" PRId64
-     "\n",
-     DPxPTR(HostPtr), DeviceId);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return OMP_TGT_FAIL;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  AsyncInfoTy AsyncInfo(Device);
-  return targetKernel(Loc, Device, DeviceId, NumTeams, ThreadLimit, HostPtr,
-                      Args, AsyncInfo);
+  return targetKernel<AsyncInfoTy>(Loc, DeviceId, NumTeams, ThreadLimit,
+                                   HostPtr, Args);
 }
 
 EXTERN int __tgt_target_kernel_nowait(
@@ -319,21 +268,8 @@ EXTERN int __tgt_target_kernel_nowait(
     void *HostPtr, __tgt_kernel_arguments *Args, int32_t DepNum, void *DepList,
     int32_t NoAliasDepNum, void *NoAliasDepList) {
   TIMESCOPE_WITH_IDENT(Loc);
-
-  DP("Entering target region with entry point " DPxMOD " and device Id %" PRId64
-     "\n",
-     DPxPTR(HostPtr), DeviceId);
-
-  if (checkDeviceAndCtors(DeviceId, Loc)) {
-    DP("Not offloading to device %" PRId64 "\n", DeviceId);
-    return OMP_TGT_FAIL;
-  }
-
-  DeviceTy &Device = *PM->Devices[DeviceId];
-
-  TaskAsyncInfoWrapperTy AsyncInfo(Device);
-  return targetKernel(Loc, Device, DeviceId, NumTeams, ThreadLimit, HostPtr,
-                      Args, AsyncInfo);
+  return targetKernel<TaskAsyncInfoWrapperTy>(Loc, DeviceId, NumTeams,
+                                              ThreadLimit, HostPtr, Args);
 }
 
 // Get the current number of components for a user-defined mapper.
