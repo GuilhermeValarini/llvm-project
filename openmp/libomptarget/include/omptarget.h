@@ -219,7 +219,7 @@ public:
   /// manner, depending on the SyncType.
   ///
   /// \note if the operations are completed, the registered post-processing
-  /// functions will be executed.
+  /// functions will be executed once and unregistered afterwards.
   ///
   /// \returns OFFLOAD_FAIL or OFFLOAD_SUCCESS appropriately.
   int synchronize();
@@ -231,7 +231,7 @@ public:
   /// Check if all asynchronous operations are completed.
   ///
   /// \note if the operations are completed, the registered post-processing
-  /// functions will be executed.
+  /// functions will be executed once and unregistered afterwards.
   ///
   /// \returns true if there is no pending asynchronous operations, false
   /// otherwise.
@@ -251,6 +251,9 @@ public:
 
 private:
   /// Run all the post-processing functions sequentially.
+  ///
+  /// \note after a successful execution, all previously registered functions
+  /// are unregistered.
   ///
   /// \returns OFFLOAD_FAIL if any post-processing function failed,
   /// OFFLOAD_SUCCESS otherwise.
@@ -409,8 +412,7 @@ int __tgt_target_kernel_nowait(ident_t *Loc, int64_t DeviceId, int32_t NumTeams,
 // operations are still pending, the function returns immediately. If the
 // operations are completed, all the post-processing procedures stored in the
 // asynchronous context are executed and the context is removed from the task
-// data. The function returns 0 if it was able to query for the nowait execution
-// and a value different than zero otherwise.
+// data.
 void __tgt_target_nowait_query(void **AsyncHandle);
 
 void __tgt_set_info_flag(uint32_t);
