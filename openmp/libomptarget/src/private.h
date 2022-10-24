@@ -225,11 +225,11 @@ public:
 
     // If no valid async handle is present, a new AsyncInfo will be allocated
     // and stored in the current task.
-    AsyncInfo = new AsyncInfoTy(Device, AsyncInfoTy::SyncTypeTy::NON_BLOCKING);
+    AsyncInfo = new AsyncInfoTy(Device, AsyncInfoTy::SyncTy::NON_BLOCKING);
     __kmpc_omp_set_target_async_handle(ExecThreadID, (void *)AsyncInfo);
   }
 
-  operator AsyncInfoTy&() { return *AsyncInfo; }
+  operator AsyncInfoTy &() { return *AsyncInfo; }
 };
 
 #include "llvm/Support/TimeProfiler.h"

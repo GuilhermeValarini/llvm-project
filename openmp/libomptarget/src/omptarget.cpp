@@ -26,14 +26,14 @@ int AsyncInfoTy::synchronize() {
   int Result = OFFLOAD_SUCCESS;
   if (AsyncInfo.Queue) {
     switch (SyncType) {
-    case SyncTypeTy::BLOCKING:
+    case SyncTy::BLOCKING:
       // If we have a queue we need to synchronize it now.
       Result = Device.synchronize(*this);
       assert(AsyncInfo.Queue == nullptr &&
              "The device plugin should have nulled the queue to indicate there "
              "are no outstanding actions!");
       break;
-    case SyncTypeTy::NON_BLOCKING:
+    case SyncTy::NON_BLOCKING:
       Result = Device.queryAsync(*this);
       break;
     }
@@ -69,8 +69,7 @@ bool AsyncInfoTy::isDone() {
 int32_t AsyncInfoTy::runPostProcessing() {
   // Clear the post processing functions and ready the struct vector to receive
   // new procedures from the post processing functions themselves.
-  SmallVector<PostProcFuncTy> Functions(
-      std::move(PostProcessingFunctions));
+  SmallVector<PostProcFuncTy> Functions(std::move(PostProcessingFunctions));
 
   for (auto &Func : Functions) {
     const int Result = Func();

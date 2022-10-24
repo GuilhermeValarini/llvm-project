@@ -313,12 +313,12 @@ EXTERN int __tgt_print_device_info(int64_t DeviceId) {
 
 EXTERN void __tgt_target_nowait_query(void **AsyncHandle) {
   if (!AsyncHandle || !*AsyncHandle) {
-    REPORT("Receive an invalid async handle from the current OpenMP task. Is "
+    FATAL_MESSAGE0(
+        1, "Receive an invalid async handle from the current OpenMP task. Is "
            "this a target nowait region?\n");
-    handleTargetOutcome(false, nullptr);
   }
 
-  auto AsyncInfo = (AsyncInfoTy *)*AsyncHandle;
+  auto *AsyncInfo = (AsyncInfoTy *)*AsyncHandle;
 
   // If the are device operations still pending, return immediately without
   // deallocating the handle.

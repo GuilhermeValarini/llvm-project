@@ -186,7 +186,7 @@ struct DeviceTy;
 /// mistakes.
 class AsyncInfoTy {
 public:
-  enum class SyncTypeTy { BLOCKING, NON_BLOCKING };
+  enum class SyncTy { BLOCKING, NON_BLOCKING };
 
 private:
   /// Locations we used in (potentially) asynchronous calls which should live
@@ -202,10 +202,10 @@ private:
   __tgt_async_info AsyncInfo;
   DeviceTy &Device;
 
-  SyncTypeTy SyncType;
+  SyncTy SyncType;
 
 public:
-  AsyncInfoTy(DeviceTy &Device, SyncTypeTy SyncType = SyncTypeTy::BLOCKING)
+  AsyncInfoTy(DeviceTy &Device, SyncTy SyncType = SyncTy::BLOCKING)
       : Device(Device), SyncType(SyncType) {}
   ~AsyncInfoTy() { synchronize(); }
 
