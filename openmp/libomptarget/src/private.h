@@ -117,8 +117,7 @@ void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32 gtid, kmp_int32 ndeps,
                           kmp_depend_info_t *dep_list, kmp_int32 ndeps_noalias,
                           kmp_depend_info_t *noalias_dep_list)
     __attribute__((weak));
-void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid) __attribute__((weak));
-bool __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle)
+void **__kmpc_omp_get_target_async_handle_ptr(kmp_int32 gtid)
     __attribute__((weak));
 bool __kmpc_omp_has_task_team(kmp_int32 gtid) __attribute__((weak));
 // Invalid GTID as defined by libomp; keep in sync
@@ -215,19 +214,25 @@ public:
     if (!__kmpc_omp_has_task_team(ExecThreadID))
       return;
 
-    // Acquire the AsyncInfo stored in async handle of the current task being
+    // Acquire a pointer to the AsyncInfo stored inside the current task being
     // executed.
-    // TODO: This should always be nullptr!
-    AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(ExecThreadID);
+    void **TaskAsyncInfoPtr =
+        __kmpc_omp_get_target_async_handle_ptr(ExecThreadID);
 
-    // If a valid AsyncInfo was acquired, use it.
-    if (AsyncInfo)
+    // If we cannot acquire such pointer, fallback to using the local blocking
+    // async info.
+    if (!TaskAsyncInfoPtr)
       return;
+
+    // When creating a new task async info, the task handle must always be
+    // invalid. We must never overwrite any task async handle and there should
+    // never be any valid handle store inside the task at this point.
+    assert((*TaskAsyncInfoPtr) == nullptr);
 
     // If no valid async handle is present, a new AsyncInfo will be allocated
     // and stored in the current task.
     AsyncInfo = new AsyncInfoTy(Device, AsyncInfoTy::SyncTy::NON_BLOCKING);
-    __kmpc_omp_set_target_async_handle(ExecThreadID, (void *)AsyncInfo);
+    *TaskAsyncInfoPtr = (void *)AsyncInfo;
   }
 
   operator AsyncInfoTy &() { return *AsyncInfo; }

@@ -5155,12 +5155,12 @@ void __kmpc_taskloop_5(ident_t *loc, int gtid, kmp_task_t *task, int if_val,
 /*!
 @ingroup TASKING
 @param gtid Global Thread ID of current thread
-@return Returns a opaque pointer to the thread's current task. If no task is
-present or gtid is invalid, returns NULL.
+@return Returns a pointer to the thread's current task async handle. If no task
+is present or gtid is invalid, returns NULL.
 
-Acqurires the target async handle from the current task.
+Acqurires a pointer to the target async handle from the current task.
 */
-void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid) {
+void **__kmpc_omp_get_target_async_handle_ptr(kmp_int32 gtid) {
   if (gtid == KMP_GTID_DNE)
     return NULL;
 
@@ -5170,32 +5170,7 @@ void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid) {
   if (!taskdata)
     return NULL;
 
-  return taskdata->td_target_data.async_handle;
-}
-
-/*!
-@ingroup TASKING
-@param gtid Global Thread ID of current thread
-@param handle New async handle address
-@return Returns TRUE if we could set the aysnc handle inside the current task
-being executed. Otherwise, if we have an invalid gtid or no current task
-reference, returns FALSE.
-
-Sets the target async handle for the current task.
-*/
-bool __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle) {
-  if (gtid == KMP_GTID_DNE)
-    return FALSE;
-
-  kmp_info_t *thread = __kmp_thread_from_gtid(gtid);
-  kmp_taskdata_t *taskdata = thread->th.th_current_task;
-
-  if (!taskdata)
-    return FALSE;
-
-  taskdata->td_target_data.async_handle = handle;
-
-  return TRUE;
+  return &taskdata->td_target_data.async_handle;
 }
 
 /*!

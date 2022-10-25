@@ -4048,9 +4048,7 @@ KMP_EXPORT void __kmp_set_teams_thread_limit(int limit);
 KMP_EXPORT int __kmp_get_teams_thread_limit(void);
 
 /* Interface target task integration */
-KMP_EXPORT void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid);
-KMP_EXPORT bool __kmpc_omp_set_target_async_handle(kmp_int32 gtid,
-                                                   void *handle);
+KMP_EXPORT void **__kmpc_omp_get_target_async_handle_ptr(kmp_int32 gtid);
 KMP_EXPORT bool __kmpc_omp_has_task_team(kmp_int32 gtid);
 
 /* Lock interface routines (fast versions with gtid passed in) */
