@@ -118,7 +118,7 @@ void __kmpc_omp_wait_deps(ident_t *loc_ref, kmp_int32 gtid, kmp_int32 ndeps,
                           kmp_depend_info_t *noalias_dep_list)
     __attribute__((weak));
 void *__kmpc_omp_get_target_async_handle(kmp_int32 gtid) __attribute__((weak));
-void __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle)
+bool __kmpc_omp_set_target_async_handle(kmp_int32 gtid, void *handle)
     __attribute__((weak));
 bool __kmpc_omp_has_task_team(kmp_int32 gtid) __attribute__((weak));
 // Invalid GTID as defined by libomp; keep in sync
@@ -212,11 +212,12 @@ public:
     // Only tasks with an assigned task team can be re-enqueue and thus can
     // use the non-blocking synchronization scheme. Thus we should use the local
     // blocking async info, if we don´t have one.
-    if (__kmpc_omp_has_task_team(ExecThreadID))
+    if (!__kmpc_omp_has_task_team(ExecThreadID))
       return;
 
     // Acquire the AsyncInfo stored in async handle of the current task being
     // executed.
+    // TODO: This should always be nullptr!
     AsyncInfo = (AsyncInfoTy *)__kmpc_omp_get_target_async_handle(ExecThreadID);
 
     // If a valid AsyncInfo was acquired, use it.
