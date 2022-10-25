@@ -198,6 +198,7 @@ class TaskAsyncInfoWrapperTy {
   const int ExecThreadID = KMP_GTID_DNE;
   AsyncInfoTy LocalAsyncInfo;
   AsyncInfoTy *AsyncInfo = &LocalAsyncInfo;
+  void **TaskAsyncInfoPtr = nullptr;
 
 public:
   TaskAsyncInfoWrapperTy(DeviceTy &Device)
@@ -216,8 +217,7 @@ public:
 
     // Acquire a pointer to the AsyncInfo stored inside the current task being
     // executed.
-    void **TaskAsyncInfoPtr =
-        __kmpc_omp_get_target_async_handle_ptr(ExecThreadID);
+    TaskAsyncInfoPtr = __kmpc_omp_get_target_async_handle_ptr(ExecThreadID);
 
     // If we cannot acquire such pointer, fallback to using the local blocking
     // async info.
@@ -233,6 +233,21 @@ public:
     // and stored in the current task.
     AsyncInfo = new AsyncInfoTy(Device, AsyncInfoTy::SyncTy::NON_BLOCKING);
     *TaskAsyncInfoPtr = (void *)AsyncInfo;
+  }
+
+  ~TaskAsyncInfoWrapperTy() {
+    // Local async info destruction is automatically handled by ~AsyncInfoTy.
+    if (AsyncInfo == &LocalAsyncInfo)
+      return;
+
+    // If the are device operations still pending, return immediately without
+    // deallocating the handle.
+    if (!AsyncInfo->isDone())
+      return;
+
+    // Delete the handle and unset it from the OpenMP task data.
+    delete AsyncInfo;
+    *TaskAsyncInfoPtr = nullptr;
   }
 
   operator AsyncInfoTy &() { return *AsyncInfo; }
