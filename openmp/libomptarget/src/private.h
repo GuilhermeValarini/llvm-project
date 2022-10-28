@@ -227,7 +227,10 @@ public:
     // When creating a new task async info, the task handle must always be
     // invalid. We must never overwrite any task async handle and there should
     // never be any valid handle store inside the task at this point.
-    assert((*TaskAsyncInfoPtr) == nullptr);
+    assert((*TaskAsyncInfoPtr) == nullptr &&
+           "Task async handle is not empty when dispatching new device "
+           "operations. The handle was not cleared properly or "
+           "__tgt_target_nowait_query should have been called!");
 
     // If no valid async handle is present, a new AsyncInfo will be allocated
     // and stored in the current task.

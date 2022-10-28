@@ -24,7 +24,7 @@ using llvm::SmallVector;
 
 int AsyncInfoTy::synchronize() {
   int Result = OFFLOAD_SUCCESS;
-  if (AsyncInfo.Queue) {
+  if (!isQueueEmpty()) {
     switch (SyncType) {
     case SyncTy::BLOCKING:
       // If we have a queue we need to synchronize it now.
@@ -52,17 +52,8 @@ void *&AsyncInfoTy::getVoidPtrLocation() {
 }
 
 bool AsyncInfoTy::isDone() {
-  // If queue is not empty, we should query for its completion.
-  if (!isQueueEmpty())
-    Device.queryAsync(*this);
-
-  // After the query, if the queue is empty, we must run the post-processing
-  // functions.
-  if (isQueueEmpty())
-    runPostProcessing();
-
-  // Post-processing functions can enqueue more operations, thus we return true
-  // only if the queue is still empty after post-processing.
+  synchronize();
+  // The async info operations are completed when the internal queue is empty.
   return isQueueEmpty();
 }
 
@@ -80,7 +71,7 @@ int32_t AsyncInfoTy::runPostProcessing() {
   return OFFLOAD_SUCCESS;
 }
 
-bool AsyncInfoTy::isQueueEmpty() { return AsyncInfo.Queue == nullptr; }
+bool AsyncInfoTy::isQueueEmpty() const { return AsyncInfo.Queue == nullptr; }
 
 /* All begin addresses for partially mapped structs must be 8-aligned in order
  * to ensure proper alignment of members. E.g.

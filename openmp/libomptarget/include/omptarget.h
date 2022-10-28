@@ -202,6 +202,7 @@ private:
   __tgt_async_info AsyncInfo;
   DeviceTy &Device;
 
+  /// Synchronization method to be used.
   SyncTy SyncType;
 
 public:
@@ -262,7 +263,7 @@ private:
   /// Check if the internal asynchronous info queue is empty or not.
   ///
   /// \returns true if empty, false otherwise.
-  bool isQueueEmpty();
+  bool isQueueEmpty() const;
 };
 
 /// This struct is a record of non-contiguous information
