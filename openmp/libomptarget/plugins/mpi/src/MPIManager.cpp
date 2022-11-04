@@ -24,12 +24,9 @@
 #include <string>
 #include <vector>
 
-// ELF utilities definitions.
-// =============================================================================
-#ifndef TARGET_ELF_ID
-#define TARGET_ELF_ID 0
-#endif
 #include "elf_common.h"
+
+using namespace OriginEvents;
 
 // Memory Allocator.
 // =============================================================================
@@ -60,12 +57,15 @@ void *MPIManagerTy::MPIDeviceAllocatorTy::allocate(size_t Size, void *HostPtr,
     return nullptr;
 
   void *DevicePtr = nullptr;
-  auto event =
-      EventSystem.createEvent<AllocEventTy>(DeviceId, Size, &DevicePtr);
-  event->wait();
+  auto Event =
+      EventSystem.createEvent(allocateBuffer, DeviceId, Size, &DevicePtr);
+  Event->wait();
 
-  if (event->getEventState() == EventStateTy::FAILED)
+  if (Event->getError()) {
+    REPORT("Allocation event failed with msg: %s",
+           toString(std::move(Event->getError())).data());
     return nullptr;
+  }
 
   return DevicePtr;
 }
@@ -80,11 +80,14 @@ int MPIManagerTy::MPIDeviceAllocatorTy::free(void *TargetPtr,
     return OFFLOAD_FAIL;
   }
 
-  auto event = EventSystem.createEvent<DeleteEventTy>(DeviceId, TargetPtr);
-  event->wait();
+  auto Event = EventSystem.createEvent(deleteBuffer, DeviceId, TargetPtr);
+  Event->wait();
 
-  if (event->getEventState() == EventStateTy::FAILED)
+  if (Event->getError()) {
+    REPORT("Deletion event failed with msg: %s",
+           toString(std::move(Event->getError())).data());
     return OFFLOAD_FAIL;
+  }
 
   return OFFLOAD_SUCCESS;
 }
@@ -331,13 +334,6 @@ bool MPIManagerTy::checkValidAsyncInfo(
   return true;
 }
 
-int32_t MPIManagerTy::checkCreatedEvent(const EventPtr &Event) const {
-  if (Event->getEventState() != EventStateTy::CREATED)
-    return OFFLOAD_FAIL;
-
-  return OFFLOAD_SUCCESS;
-}
-
 bool MPIManagerTy::checkRecordedEventPtr(const void *Event) const {
   if (!Event) {
     REPORT("Received an invalid recorded event pointer\n");
@@ -378,11 +374,11 @@ int32_t MPIManagerTy::dataSubmit(int32_t DeviceId, void *TargetPtr,
   if (!checkValidAsyncInfo(AsyncInfo))
     return OFFLOAD_FAIL;
 
-  auto Event = EventSystem.createEvent<SubmitEventTy>(DeviceId, TargetPtr,
-                                                      HostPtr, Size);
+  auto Event =
+      EventSystem.createEvent(submit, DeviceId, HostPtr, TargetPtr, Size);
   pushNewEvent(Event, AsyncInfo);
 
-  return checkCreatedEvent(Event);
+  return OFFLOAD_SUCCESS;
 }
 
 int32_t MPIManagerTy::dataRetrieve(int32_t DeviceId, void *HostPtr,
@@ -394,11 +390,11 @@ int32_t MPIManagerTy::dataRetrieve(int32_t DeviceId, void *HostPtr,
   if (!checkValidAsyncInfo(AsyncInfo))
     return OFFLOAD_FAIL;
 
-  auto Event = EventSystem.createEvent<RetrieveEventTy>(DeviceId, HostPtr,
-                                                        TargetPtr, Size);
+  auto Event =
+      EventSystem.createEvent(retrieve, DeviceId, HostPtr, TargetPtr, Size);
   pushNewEvent(Event, AsyncInfo);
 
-  return checkCreatedEvent(Event);
+  return OFFLOAD_SUCCESS;
 }
 
 int32_t MPIManagerTy::dataExchange(int32_t SrcID, void *SrcPtr, int32_t DstId,
@@ -410,8 +406,8 @@ int32_t MPIManagerTy::dataExchange(int32_t SrcID, void *SrcPtr, int32_t DstId,
   if (!checkValidAsyncInfo(AsyncInfo))
     return OFFLOAD_FAIL;
 
-  auto Event = EventSystem.createEvent<ExchangeEventTy>(SrcID, DstId + 1,
-                                                        SrcPtr, DstPtr, Size);
+  auto Event =
+      EventSystem.createEvent(exchange, SrcID, DstId + 1, SrcPtr, DstPtr, Size);
   pushNewEvent(Event, AsyncInfo);
 
   return OFFLOAD_SUCCESS;
@@ -454,8 +450,8 @@ int32_t MPIManagerTy::runTargetRegion(int32_t DeviceId, void *Entry,
     break;
   }
 
-  auto event = EventSystem.createEvent<ExecuteEventTy>(
-      DeviceId, NumArgs, ArgPtrs.data(), EntryIdx);
+  auto event =
+      EventSystem.createEvent(execute, DeviceId, std::move(ArgPtrs), EntryIdx);
   pushNewEvent(event, AsyncInfo);
 
   return OFFLOAD_SUCCESS;
@@ -492,10 +488,10 @@ int32_t MPIManagerTy::synchronize(int32_t DeviceId,
   for (auto &Event : *Queue) {
     Event->wait();
 
-    // Check if the event failed
-    if (Event->getEventState() == EventStateTy::FAILED) {
-      REPORT("Event %s has failed during synchronization.\n",
-             toString(Event->EventType));
+    // Check if the event failed]
+    if (Event->getError()) {
+      REPORT("Event failed during synchronization with msg: %s",
+             toString(std::move(Event->getError())).data());
       Result = OFFLOAD_FAIL;
       break;
     }
@@ -594,7 +590,7 @@ int32_t MPIManagerTy::waitEvent(int32_t ID, void *Event,
   // `Event` would execute it instead of waiting for its predecessors in its
   // original event queue.
   EventQueue *Queue = getEventQueue(AsyncInfo);
-  Queue->push_back(std::make_shared<SyncEventTy>(RecordedEvent));
+  Queue->push_back(std::make_shared<EventTy>(sync(RecordedEvent)));
   return OFFLOAD_SUCCESS;
 }
 
@@ -613,8 +609,8 @@ int32_t MPIManagerTy::syncEvent(int32_t ID, void *Event) {
   // completed up to the `Event` itself. Directly waiting on `Event` would
   // execute it instead of waiting for its predecessors in its original event
   // queue.
-  auto WaitEvent = std::make_shared<SyncEventTy>(RecordedEvent);
-  WaitEvent->wait();
+  auto WaitEvent = sync(RecordedEvent);
+  WaitEvent.wait();
 
   return OFFLOAD_SUCCESS;
 }
