@@ -17,42 +17,38 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
-#include <ffi.h>
 #include <limits>
 #include <sstream>
 
-#include "Common.h"
-#include "Coroutines.h"
+#include <ffi.h>
 
+#include "Debug.h"
+#include "Utilities.h"
 #include "omptarget.h"
 
-// Helper coroutine macros
-#define EVENT_BEGIN() CO_BEGIN()
-#define EVENT_PAUSE() CO_YIELD(false)
-#define EVENT_PAUSE_FOR_REQUESTS()                                             \
-  while (!checkPendingRequests()) {                                            \
-    EVENT_PAUSE();                                                             \
+#define CHECK(expr, msg, ...)                                                  \
+  if (!(expr)) {                                                               \
+    REPORT(msg, ##__VA_ARGS__);                                                \
+    return false;                                                              \
   }
-#define EVENT_END() CO_RETURN(true)
 
 // Customizable parameters of the event system
 // =============================================================================
-// Here we declare some configuration variables with their respective default
-// values. Every single one of them can be tuned by an environment variable with
-// the following name pattern: OMPCLUSTER_VAR_NAME.
-namespace config {
-// Maximum buffer Size to use during data transfer.
-static int64_t MPI_FRAGMENT_SIZE = 100e6;
 // Number of execute event handlers to spawn.
-static int NUM_EXEC_EVENT_HANDLERS = 1;
+static llvm::omp::target::IntEnvar
+    NumExecEventHandlers("OMPTARGET_NUM_EXEC_EVENT_HANDLERS", 100e6);
 // Number of data event handlers to spawn.
-static int NUM_DATA_EVENT_HANDLERS = 1;
+static llvm::omp::target::IntEnvar
+    NumDataEventHandlers("OMPTARGET_NUM_DATA_EVENT_HANDLERS", 1);
 // Polling rate period (us) used by event handlers.
-static int EVENT_POLLING_RATE = 1;
-// Number of communicators to be spawned and distributed for the events. Allows
-// for parallel use of network resources.
-static int64_t NUM_EVENT_COMM = 10;
-} // namespace config
+static llvm::omp::target::IntEnvar
+    EventPollingRate("OMPTARGET_EVENT_POLLING_RATE", 1);
+// Number of communicators to be spawned and distributed for the events.
+// Allows for parallel use of network resources.
+static llvm::omp::target::Int64Envar NumMPIComms("OMPTARGET_NUM_MPI_COMMS", 1);
+// Maximum buffer Size to use during data transfer.
+static llvm::omp::target::Int64Envar
+    MPIFragmentSize("OMPTARGET_MPI_FRAGMENT_SIZE", 10);
 
 // Helper functions
 // =============================================================================
@@ -76,588 +72,336 @@ const char *toString(EventTypeTy Type) {
     return "Exit";
   }
 
-  assertm(false, "Every enum value must be checked on the switch above.");
+  assert(false && "Every enum value must be checked on the switch above.");
   return nullptr;
 }
 
-const char *toString(EventLocationTy Location) {
-  switch (Location) {
-  case EventLocationTy::DEST:
-    return "Destination";
-  case EventLocationTy::ORIG:
-    return "Origin";
-  }
-
-  assertm(false, "Every enum value must be checked on the switch above.");
-  return nullptr;
-}
-
-const char *toString(EventStateTy State) {
-  switch (State) {
-  case EventStateTy::CREATED:
-    return "Created";
-  case EventStateTy::EXECUTING:
-    return "Executing";
-  case EventStateTy::WAITING:
-    return "Waiting";
-  case EventStateTy::FAILED:
-    return "Failed";
-  case EventStateTy::FINISHED:
-    return "Finished";
-  }
-
-  assertm(false, "Every enum value must be checked on the switch above.");
-  return nullptr;
-}
-
-// Base Event implementation
+// Coroutine events implementation
 // =============================================================================
-BaseEventTy::BaseEventTy(EventLocationTy EventLocation, EventTypeTy EventType,
-                         int MPITag, MPI_Comm TargetComm, int OrigRank,
-                         int DestRank)
-    : EventLocation(EventLocation), EventType(EventType),
-      TargetComm(TargetComm), MPITag(MPITag), OrigRank(OrigRank),
-      DestRank(DestRank) {
-  assertm(MPITag >= static_cast<int>(ControlTagsTy::FIRST_EVENT),
-          "Event MPI tag must not have a Control Tag value");
-  assertm(MPITag <= EventSystemTy::MPITagMaxValue,
-          "Event MPI tag must be smaller than the maximum value allowed");
-}
+void EventTy::resume() {
+  // Acquire first handle not done.
+  const CoHandleTy &rootHandle = Handle.promise().rootHandle;
+  auto &resumableHandle = rootHandle.promise().prevHandle;
+  while (resumableHandle.done()) {
+    resumableHandle = resumableHandle.promise().prevHandle;
 
-void BaseEventTy::notifyNewEvent() {
-  if (EventLocation == EventLocationTy::ORIG) {
-    // Sends event request.
-    InitialRequestInfo[0] = static_cast<uint32_t>(EventType);
-    InitialRequestInfo[1] = static_cast<uint32_t>(MPITag);
-
-    if (OrigRank != DestRank)
-      MPI_Isend(InitialRequestInfo, 2, MPI_UINT32_T, DestRank,
-                static_cast<int>(ControlTagsTy::EVENT_REQUEST),
-                EventSystemTy::GateThreadComm, getNextRequest());
-  }
-}
-
-bool BaseEventTy::runCoroutine() {
-  if (EventLocation == EventLocationTy::ORIG) {
-    return runOrigin();
-  } else {
-    return runDestination();
-  }
-}
-
-bool BaseEventTy::checkPendingRequests() {
-  int RequestsCompleted = false;
-
-  MPI_Testall(PendingRequests.size(), PendingRequests.data(),
-              &RequestsCompleted, MPI_STATUSES_IGNORE);
-
-  return RequestsCompleted;
-}
-
-bool BaseEventTy::isDone() const {
-  return (EventState == EventStateTy::FINISHED) ||
-         (EventState == EventStateTy::FAILED);
-}
-
-void BaseEventTy::progress() {
-  // Immediately return if the event is already finished
-  if (isDone()) {
-    return;
-  }
-
-  // The following code block uses a guard to ensure only one thread is
-  // executing the progress function at a time, returning immediately for all
-  // the other threads (e.g. multiple threads waiting on the same event).
-  //
-  // If one thread is already advancing the event execution at a node, there is
-  // no need for other threads to execute the progress function. Returning
-  // immediately frees other threads to execute other events/procedures and
-  // allows the events run* coroutines to be implemented in a not thead-safe
-  // manner.
-  bool ExpectedProgressGuard = false;
-  if (!ProgressGuard.compare_exchange_weak(ExpectedProgressGuard, true)) {
-    return;
-  }
-
-  // Advance the event local execution depending on its state.
-  switch (EventState) {
-  case EventStateTy::CREATED:
-    notifyNewEvent();
-    EventState = EventStateTy::EXECUTING;
-    [[fallthrough]];
-
-  case EventStateTy::EXECUTING:
-    if (!runCoroutine())
+    if (resumableHandle == rootHandle)
       break;
-    EventState = EventStateTy::WAITING;
-    [[fallthrough]];
-
-  case EventStateTy::WAITING:
-    if (!checkPendingRequests())
-      break;
-    if (EventState != EventStateTy::FAILED)
-      EventState = EventStateTy::FINISHED;
-    break;
-
-  case EventStateTy::FAILED:
-    REPORT("MPI event %s failed.\n", toString(EventType));
-    [[fallthrough]];
-
-  case EventStateTy::FINISHED:
-    break;
   }
 
-  // Allow other threads to call progress again.
-  ProgressGuard = false;
+  if (!resumableHandle.done())
+    resumableHandle.resume();
 }
 
-void BaseEventTy::wait() {
+void EventTy::wait() {
   // Advance the event progress until it is completed.
-  while (!isDone()) {
-    progress();
+  while (!done()) {
+    resume();
 
     std::this_thread::sleep_for(
-        std::chrono::microseconds(config::EVENT_POLLING_RATE));
+        std::chrono::microseconds(EventPollingRate.get()));
   }
 }
 
-EventStateTy BaseEventTy::getEventState() const { return EventState; }
+bool EventTy::done() const { return Handle.done(); }
 
-MPI_Request *BaseEventTy::getNextRequest() {
-  PendingRequests.emplace_back(MPI_REQUEST_NULL);
-  return &PendingRequests.back();
+bool EventTy::empty() const { return !Handle; }
+
+llvm::Error &EventTy::getError() const {
+  return Handle.promise().CoroutineError;
 }
 
-// Alloc Event implementation
+EventTy::~EventTy() {
+  if (Handle)
+    Handle.destroy();
+}
+
+// Helpers
 // =============================================================================
-AllocEventTy::AllocEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                           int DestRank, int64_t Size, void **AllocatedAddress)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::ALLOC, MPITag, TargetComm,
-                  OrigRank, DestRank),
-      Size(Size), AllocatedAddressPtr(AllocatedAddress) {
-  assertm(Size >= 0, "AllocEvent must receive a Size >= 0");
-  assertm(AllocatedAddress != nullptr,
-          "AllocEvent must receive a valid pointer as AllocatedAddress");
+MPIRequestManagerTy::~MPIRequestManagerTy() {
+  assert(Requests.empty() && "Requests must be fulfilled and emptied before "
+                             "destruction. Did you co_await on it?");
 }
 
-bool AllocEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
-
-  EVENT_BEGIN();
-
-  MPI_Isend(&Size, 1, MPI_INT64_T, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Irecv(AllocatedAddressPtr, sizeof(uintptr_t), MPI_BYTE, DestRank, MPITag,
-            TargetComm, getNextRequest());
-
-  EVENT_END();
+void MPIRequestManagerTy::send(const void *Buffer, int Size,
+                               MPI_Datatype Datatype) {
+  MPI_Isend(Buffer, Size, Datatype, OtherRank, Tag, Comm,
+            &Requests.emplace_back(MPI_REQUEST_NULL));
 }
 
-AllocEventTy::AllocEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                           int DestRank)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::ALLOC, MPITag, TargetComm,
-                  OrigRank, DestRank) {}
-
-bool AllocEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
-
-  EVENT_BEGIN();
-
-  MPI_Irecv(&Size, 1, MPI_INT64_T, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_PAUSE_FOR_REQUESTS();
-
-  DestAddress = malloc(Size);
-
-  MPI_Isend(&DestAddress, sizeof(uintptr_t), MPI_BYTE, OrigRank, MPITag,
-            TargetComm, getNextRequest());
-
-  EVENT_END();
+void MPIRequestManagerTy::receive(void *Buffer, int Size,
+                                  MPI_Datatype Datatype) {
+  MPI_Irecv(Buffer, Size, Datatype, OtherRank, Tag, Comm,
+            &Requests.emplace_back(MPI_REQUEST_NULL));
 }
 
-// Delete Event implementation
-// =============================================================================
-DeleteEventTy::DeleteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                             int DestRank, void *TargetAddress)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::DELETE, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      TargetAddress(TargetAddress) {}
+EventTy MPIRequestManagerTy::wait() {
+  int RequestsCompleted = false;
 
-bool DeleteEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
+  while (!RequestsCompleted) {
+    int MPIError = MPI_Testall(Requests.size(), Requests.data(),
+                               &RequestsCompleted, MPI_STATUSES_IGNORE);
 
-  EVENT_BEGIN();
+    if (MPIError != MPI_SUCCESS)
+      co_return createError("Waiting of MPI requests failed with code %d",
+                            MPIError);
 
-  MPI_Isend(&TargetAddress, sizeof(void *), MPI_BYTE, DestRank, MPITag,
-            TargetComm, getNextRequest());
-
-  // Event completion notification
-  MPI_Irecv(nullptr, 0, MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_END();
-}
-
-DeleteEventTy::DeleteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                             int DestRank)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::DELETE, MPITag,
-                  TargetComm, OrigRank, DestRank) {}
-
-bool DeleteEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
-
-  EVENT_BEGIN();
-
-  MPI_Irecv(&TargetAddress, sizeof(void *), MPI_BYTE, OrigRank, MPITag,
-            TargetComm, getNextRequest());
-
-  EVENT_PAUSE_FOR_REQUESTS();
-
-  free(TargetAddress);
-
-  // Event completion notification
-  MPI_Isend(nullptr, 0, MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_END();
-}
-
-// Retrieve Event implementation
-// =============================================================================
-RetrieveEventTy::RetrieveEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                                 int DestRank, void *OrigPtr,
-                                 const void *DestPtr, int64_t Size)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::RETRIEVE, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      OrigPtr(OrigPtr), DestPtr(DestPtr), Size(Size) {
-  assertm(Size >= 0, "RetrieveEvent must receive a Size >= 0");
-  assertm(OrigPtr != nullptr,
-          "RetrieveEvent must receive a valid pointer as OrigPtr");
-  assertm(DestPtr != nullptr,
-          "RetrieveEvent must receive a valid pointer as DestPtr");
-}
-
-bool RetrieveEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
-
-  char *BufferByteArray = nullptr;
-  int64_t RemainingBytes = 0;
-
-  EVENT_BEGIN();
-
-  MPI_Isend(&DestPtr, sizeof(uintptr_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Isend(&Size, sizeof(int64_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  // TODO: Extract this to an common function for both dest/orig for
-  // submit/retrieve.
-  // Operates over many fragments of the original buffer of at
-  // most MPI_FRAGMENT_SIZE bytes.
-  BufferByteArray = reinterpret_cast<char *>(OrigPtr);
-  RemainingBytes = Size;
-  while (RemainingBytes > 0) {
-    MPI_Irecv(
-        &BufferByteArray[Size - RemainingBytes],
-        static_cast<int>(std::min(RemainingBytes, config::MPI_FRAGMENT_SIZE)),
-        MPI_BYTE, DestRank, MPITag, TargetComm, getNextRequest());
-    RemainingBytes -= config::MPI_FRAGMENT_SIZE;
+    co_await std::suspend_always{};
   }
 
-  EVENT_END();
+  Requests.clear();
+
+  co_return llvm::Error::success();
 }
 
-RetrieveEventTy::RetrieveEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                                 int DestRank)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::RETRIEVE, MPITag,
-                  TargetComm, OrigRank, DestRank) {}
+EventTy operator co_await(MPIRequestManagerTy &RequestManager) {
+  return RequestManager.wait();
+}
 
-bool RetrieveEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
+// Event Implementations
+// =============================================================================
 
-  const char *BufferByteArray = nullptr;
-  int64_t RemainingBytes = 0;
+namespace OriginEvents {
 
-  EVENT_BEGIN();
+EventTy allocateBuffer(MPIRequestManagerTy RequestManager, int64_t Size,
+                       void **Buffer) {
+  RequestManager.send(&Size, 1, MPI_INT64_T);
 
-  MPI_Irecv(&DestPtr, sizeof(uintptr_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.receive(Buffer, sizeof(void *), MPI_BYTE);
 
-  MPI_Irecv(&Size, sizeof(int64_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  co_return (co_await RequestManager);
+}
 
-  EVENT_PAUSE_FOR_REQUESTS();
+EventTy deleteBuffer(MPIRequestManagerTy RequestManager, void *Buffer) {
+  RequestManager.send(&Buffer, sizeof(void *), MPI_BYTE);
+
+  // Event completion notification
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
+
+  co_return (co_await RequestManager);
+}
+
+EventTy submit(MPIRequestManagerTy RequestManager, void *OrgBuffer,
+               void *DstBuffer, int64_t Size) {
+  RequestManager.send(&DstBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.send(&Size, 1, MPI_INT64_T);
 
   // Operates over many fragments of the original buffer of at most
   // MPI_FRAGMENT_SIZE bytes.
-  BufferByteArray = reinterpret_cast<const char *>(DestPtr);
-  RemainingBytes = Size;
+  char *BufferByteArray = reinterpret_cast<char *>(OrgBuffer);
+  int64_t RemainingBytes = Size;
   while (RemainingBytes > 0) {
-    MPI_Isend(
+    RequestManager.send(
         &BufferByteArray[Size - RemainingBytes],
-        static_cast<int>(std::min(RemainingBytes, config::MPI_FRAGMENT_SIZE)),
-        MPI_BYTE, OrigRank, MPITag, TargetComm, getNextRequest());
-    RemainingBytes -= config::MPI_FRAGMENT_SIZE;
+        static_cast<int>(std::min(RemainingBytes, MPIFragmentSize.get())),
+        MPI_BYTE);
+    RemainingBytes -= MPIFragmentSize.get();
   }
 
-  EVENT_END();
+  // Event completion notification
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
+
+  co_return (co_await RequestManager);
 }
 
-// Submit Event implementation
-// =============================================================================
-SubmitEventTy::SubmitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                             int DestRank, const void *OrigPtr, void *DestPtr,
-                             int64_t Size)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::SUBMIT, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      OrigPtr(OrigPtr), DestPtr(DestPtr), Size(Size) {
-  assertm(Size >= 0, "SubmitEvent must receive a Size >= 0");
-  assertm(OrigPtr != nullptr,
-          "SubmitEvent must receive a valid pointer as OrigPtr");
-  assertm(DestPtr != nullptr,
-          "SubmitEvent must receive a valid pointer as DestPtr");
-}
-
-bool SubmitEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
-
-  const char *BufferByteArray;
-  int64_t RemainingBytes;
-
-  EVENT_BEGIN();
-
-  MPI_Isend(&DestPtr, sizeof(uintptr_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Isend(&Size, sizeof(int64_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
+EventTy retrieve(MPIRequestManagerTy RequestManager, void *OrgBuffer,
+                 void *DstBuffer, int64_t Size) {
+  RequestManager.send(&DstBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.send(&Size, 1, MPI_INT64_T);
 
   // Operates over many fragments of the original buffer of at most
   // MPI_FRAGMENT_SIZE bytes.
-  BufferByteArray = reinterpret_cast<const char *>(OrigPtr);
-  RemainingBytes = Size;
+  char *BufferByteArray = reinterpret_cast<char *>(OrgBuffer);
+  int64_t RemainingBytes = Size;
   while (RemainingBytes > 0) {
-    MPI_Isend(
+    RequestManager.receive(
         &BufferByteArray[Size - RemainingBytes],
-        static_cast<int>(std::min(RemainingBytes, config::MPI_FRAGMENT_SIZE)),
-        MPI_BYTE, DestRank, MPITag, TargetComm, getNextRequest());
-    RemainingBytes -= config::MPI_FRAGMENT_SIZE;
+        static_cast<int>(std::min(RemainingBytes, MPIFragmentSize.get())),
+        MPI_BYTE);
+    RemainingBytes -= MPIFragmentSize.get();
   }
 
   // Event completion notification
-  MPI_Irecv(nullptr, 0, MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
 
-  EVENT_END();
+  co_return (co_await RequestManager);
 }
 
-SubmitEventTy::SubmitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                             int DestRank)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::SUBMIT, MPITag,
-                  TargetComm, OrigRank, DestRank) {}
+EventTy exchange(MPIRequestManagerTy RequestManager, int DstRank,
+                 void *OrgBuffer, void *DstBuffer, int64_t Size) {
+  RequestManager.send(&DstRank, 1, MPI_INT);
+  RequestManager.send(&OrgBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.send(&DstBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.send(&Size, 1, MPI_INT64_T);
 
-bool SubmitEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
+  // Event completion notification
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
 
-  char *BufferByteArray = nullptr;
-  int64_t RemainingBytes = 0;
+  co_return (co_await RequestManager);
+}
 
-  EVENT_BEGIN();
+EventTy execute(MPIRequestManagerTy RequestManager,
+                llvm::SmallVector<void *> Args, uint32_t TargetEntryIdx) {
+  const size_t NumArgs = Args.size();
+  RequestManager.send(&NumArgs, 1, MPI_UINT64_T);
+  RequestManager.send(Args.data(), NumArgs * sizeof(void *), MPI_BYTE);
+  RequestManager.send(&TargetEntryIdx, 1, MPI_INT32_T);
 
-  MPI_Irecv(&DestPtr, sizeof(uintptr_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  // Event completion notification
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
 
-  MPI_Irecv(&Size, sizeof(int64_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  co_return (co_await RequestManager);
+}
 
-  EVENT_PAUSE_FOR_REQUESTS();
+EventTy sync(EventPtr Event) {
+  while (Event->done())
+    co_await std::suspend_always{};
+
+  co_return llvm::Error::success();
+}
+
+EventTy exit(MPIRequestManagerTy RequestManager) {
+  // Event completion notification
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
+  co_return (co_await RequestManager);
+}
+
+} // namespace OriginEvents
+
+namespace DestinationEvents {
+
+EventTy allocateBuffer(MPIRequestManagerTy RequestManager) {
+  int64_t Size = 0;
+  RequestManager.receive(&Size, 1, MPI_INT64_T);
+
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
+
+  void *Buffer = malloc(Size);
+  RequestManager.send(&Buffer, sizeof(void *), MPI_BYTE);
+
+  co_return (co_await RequestManager);
+}
+
+EventTy deleteBuffer(MPIRequestManagerTy RequestManager) {
+  void *Buffer = nullptr;
+  RequestManager.receive(&Buffer, sizeof(void *), MPI_BYTE);
+
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
+
+  free(Buffer);
+
+  // Event completion notification
+  RequestManager.send(nullptr, 0, MPI_BYTE);
+
+  co_return (co_await RequestManager);
+}
+
+EventTy submit(MPIRequestManagerTy RequestManager) {
+  void *Buffer = nullptr;
+  int64_t Size = 0;
+  RequestManager.receive(&Buffer, sizeof(void *), MPI_BYTE);
+  RequestManager.receive(&Size, 1, MPI_INT64_T);
+
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
 
   // Operates over many fragments of the original buffer of at most
   // MPI_FRAGMENT_SIZE bytes.
-  BufferByteArray = reinterpret_cast<char *>(DestPtr);
-  RemainingBytes = Size;
+  char *BufferByteArray = reinterpret_cast<char *>(Buffer);
+  int64_t RemainingBytes = Size;
   while (RemainingBytes > 0) {
-    MPI_Irecv(
+    RequestManager.receive(
         &BufferByteArray[Size - RemainingBytes],
-        static_cast<int>(std::min(RemainingBytes, config::MPI_FRAGMENT_SIZE)),
-        MPI_BYTE, OrigRank, MPITag, TargetComm, getNextRequest());
-    RemainingBytes -= config::MPI_FRAGMENT_SIZE;
+        static_cast<int>(std::min(RemainingBytes, MPIFragmentSize.get())),
+        MPI_BYTE);
+    RemainingBytes -= MPIFragmentSize.get();
   }
 
   // Event completion notification
-  MPI_Isend(nullptr, 0, MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.send(nullptr, 0, MPI_BYTE);
 
-  EVENT_END();
+  co_return (co_await RequestManager);
 }
 
-// Exchange Event implementation
-// =============================================================================
-ExchangeEventTy::ExchangeEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                                 int DestRank, int data_dst_rank,
-                                 const void *src_ptr, void *dst_ptr,
-                                 int64_t Size)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::EXCHANGE, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      DataDestRank(data_dst_rank), SrcPtr(src_ptr), DstPtr(dst_ptr),
-      Size(Size) {
-  assertm(Size >= 0, "ExchangeEvent must receive a Size >= 0");
-  assertm(src_ptr != nullptr,
-          "ExchangeEvent must receive a valid pointer as src_ptr");
-  assertm(dst_ptr != nullptr,
-          "ExchangeEvent must receive a valid pointer as dst_ptr");
-}
+EventTy retrieve(MPIRequestManagerTy RequestManager) {
+  void *Buffer = nullptr;
+  int64_t Size = 0;
+  RequestManager.receive(&Buffer, sizeof(void *), MPI_BYTE);
+  RequestManager.receive(&Size, 1, MPI_INT64_T);
 
-bool ExchangeEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
 
-  EVENT_BEGIN();
-
-  MPI_Isend(&DataDestRank, sizeof(int), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Isend(&SrcPtr, sizeof(uintptr_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Isend(&DstPtr, sizeof(uintptr_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Isend(&Size, sizeof(int64_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
+  // Operates over many fragments of the original buffer of at most
+  // MPI_FRAGMENT_SIZE bytes.
+  char *BufferByteArray = reinterpret_cast<char *>(Buffer);
+  int64_t RemainingBytes = Size;
+  while (RemainingBytes > 0) {
+    RequestManager.send(
+        &BufferByteArray[Size - RemainingBytes],
+        static_cast<int>(std::min(RemainingBytes, MPIFragmentSize.get())),
+        MPI_BYTE);
+    RemainingBytes -= MPIFragmentSize.get();
+  }
 
   // Event completion notification
-  MPI_Irecv(nullptr, 0, MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.send(nullptr, 0, MPI_BYTE);
 
-  EVENT_END();
+  co_return (co_await RequestManager);
 }
 
-ExchangeEventTy::ExchangeEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                                 int DestRank)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::EXCHANGE, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      DataDestRank(-1), SrcPtr(nullptr), DstPtr(nullptr), Size(0) {}
+EventTy exchange(MPIRequestManagerTy RequestManager,
+                 EventSystemTy &EventSystem) {
+  int DstRank = 0;
+  void *OrgBuffer = nullptr;
+  void *DstBuffer = nullptr;
+  int64_t Size = 0;
+  RequestManager.receive(&DstRank, 1, MPI_INT);
+  RequestManager.receive(&OrgBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.receive(&DstBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.receive(&Size, 1, MPI_INT64_T);
 
-bool ExchangeEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
 
-  EVENT_BEGIN();
-
-  MPI_Irecv(&DataDestRank, sizeof(int), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Irecv(&SrcPtr, sizeof(uintptr_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Irecv(&DstPtr, sizeof(uintptr_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Irecv(&Size, sizeof(int64_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_PAUSE_FOR_REQUESTS();
-
-  RemoteSubmitEvent = std::make_shared<SubmitEventTy>(
-      MPITag, TargetComm, DestRank, DataDestRank, SrcPtr, DstPtr, Size);
-
-  do {
-    RemoteSubmitEvent->progress();
-
-    if (!RemoteSubmitEvent->isDone()) {
-      EVENT_PAUSE();
-    }
-  } while (!RemoteSubmitEvent->isDone());
+  auto RemoteSubmit = EventSystem.createEvent(OriginEvents::submit, DstRank,
+                                              OrgBuffer, DstBuffer, Size);
+  if (auto Error = co_await *RemoteSubmit; Error)
+    co_return Error;
 
   // Event completion notification
-  MPI_Isend(nullptr, 0, MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.receive(nullptr, 0, MPI_BYTE);
 
-  EVENT_END();
+  co_return (co_await RequestManager);
 }
 
-// Execute Event implementation
-// =============================================================================
-ExecuteEventTy::ExecuteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                               int DestRank, int32_t NumArgs, void **ArgsArray,
-                               uint32_t TargetEntryIdx)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::EXECUTE, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      NumArgs(NumArgs), Args(NumArgs, nullptr), TargetEntryIdx(TargetEntryIdx) {
-  assertm(NumArgs >= 0, "ExecuteEvent must receive an NumArgs >= 0");
-  assertm(NumArgs == 0 || ArgsArray != nullptr,
-          "ExecuteEvent must receive a valid Args when NumArgs > 0");
+EventTy execute(MPIRequestManagerTy RequestManager,
+                __tgt_target_table *TargetTable) {
 
-  std::copy_n(ArgsArray, NumArgs, Args.begin());
-}
+  size_t NumArgs = 0;
+  RequestManager.receive(&NumArgs, 1, MPI_UINT64_T);
 
-bool ExecuteEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
 
-  EVENT_BEGIN();
+  llvm::SmallVector<void *> Args(NumArgs);
+  RequestManager.receive(Args.data(), NumArgs * sizeof(uintptr_t), MPI_BYTE);
+  uint32_t TargetEntryIdx = -1;
+  RequestManager.receive(&TargetEntryIdx, sizeof(uint32_t), MPI_BYTE);
 
-  MPI_Isend(&NumArgs, sizeof(int32_t), MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  MPI_Isend(Args.data(), NumArgs * sizeof(uintptr_t), MPI_BYTE, DestRank,
-            MPITag, TargetComm, getNextRequest());
-
-  MPI_Isend(&TargetEntryIdx, sizeof(uint32_t), MPI_BYTE, DestRank, MPITag,
-            TargetComm, getNextRequest());
-
-  // Event completion notification
-  MPI_Irecv(nullptr, 0, MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_END();
-}
-
-ExecuteEventTy::ExecuteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                               int DestRank, __tgt_target_table *TargetTable)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::EXECUTE, MPITag,
-                  TargetComm, OrigRank, DestRank),
-      TargetTable(TargetTable) {
-  assertm(TargetTable != nullptr,
-          "ExecuteEvent must receive a valid pointer as TargetTable");
-}
-
-bool ExecuteEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
-
-  __tgt_offload_entry *Begin = nullptr;
-  __tgt_offload_entry *End = nullptr;
-  __tgt_offload_entry *Curr = nullptr;
-  ffi_cif Cif{};
-  llvm::SmallVector<ffi_type *> ArgsTypes{};
-  ffi_status FFIStatus [[maybe_unused]] = FFI_OK;
-  void (*TargetEntry)(void) = nullptr;
-
-  EVENT_BEGIN();
-
-  MPI_Irecv(&NumArgs, sizeof(int32_t), MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_PAUSE_FOR_REQUESTS();
-
-  Args.resize(NumArgs, nullptr);
-  ArgsTypes.resize(NumArgs, &ffi_type_pointer);
-  MPI_Irecv(Args.data(), NumArgs * sizeof(uintptr_t), MPI_BYTE, OrigRank,
-            MPITag, TargetComm, getNextRequest());
-
-  MPI_Irecv(&TargetEntryIdx, sizeof(uint32_t), MPI_BYTE, OrigRank, MPITag,
-            TargetComm, getNextRequest());
-
-  EVENT_PAUSE_FOR_REQUESTS();
+  if (auto Error = co_await RequestManager; Error)
+    co_return Error;
 
   // Iterates over all the host table entries to see if we can locate the
   // host_ptr.
-  Begin = TargetTable->EntriesBegin;
-  End = TargetTable->EntriesEnd;
-  Curr = Begin;
+  __tgt_offload_entry *Begin = TargetTable->EntriesBegin;
+  __tgt_offload_entry *End = TargetTable->EntriesEnd;
+  __tgt_offload_entry *Curr = Begin;
 
   // Iterates over all the table entries to see if we can locate the entry.
+  void (*TargetEntry)(void) = nullptr;
   for (uint32_t I = 0; Curr < End; ++Curr, ++I) {
     if (I == TargetEntryIdx) {
       // We got a match, now fill the HostPtrToTableMap so that we may avoid
@@ -667,85 +411,31 @@ bool ExecuteEventTy::runDestination() {
     }
   }
 
-  // Return failure when entry not found.
-  assertm(Curr != End, "Could not find the right entry");
-
-  FFIStatus = ffi_prep_cif(&Cif, FFI_DEFAULT_ABI, NumArgs, &ffi_type_void,
-                           &ArgsTypes[0]);
-
-  assertm(FFIStatus == FFI_OK, "Unable to prepare target launch!");
-
+  ffi_cif Cif{};
+  llvm::SmallVector<ffi_type *> ArgsTypes(NumArgs);
+  ffi_prep_cif(&Cif, FFI_DEFAULT_ABI, NumArgs, &ffi_type_void, &ArgsTypes[0]);
   ffi_call(&Cif, TargetEntry, NULL, &Args[0]);
 
   // Event completion notification
-  MPI_Isend(nullptr, 0, MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.send(nullptr, 0, MPI_BYTE);
 
-  EVENT_END();
+  co_return (co_await RequestManager);
 }
 
-// Sync Event implementation
-// =============================================================================
-SyncEventTy::SyncEventTy(EventPtr &target_event)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::SYNC,
-                  EventSystemTy::MPITagMaxValue, 0, 0, 0),
-      TargetEvent(target_event) {}
-
-bool SyncEventTy::runOrigin() { return true; }
-
-bool SyncEventTy::runDestination() {
-  EVENT_BEGIN();
-
-  while (!TargetEvent->isDone()) {
-    EVENT_PAUSE();
-  }
-
-  EVENT_END();
-}
-
-// Exit Event implementation
-// =============================================================================
-ExitEventTy::ExitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                         int DestRank)
-    : BaseEventTy(EventLocationTy::ORIG, EventTypeTy::EXIT, MPITag, TargetComm,
-                  OrigRank, DestRank) {}
-
-bool ExitEventTy::runOrigin() {
-  assert(EventLocation == EventLocationTy::ORIG);
-
-  EVENT_BEGIN();
+EventTy exit(MPIRequestManagerTy RequestManager,
+             std::atomic<EventSystemStateTy> &EventSystemState) {
+  EventSystemStateTy OldState =
+      EventSystemState.exchange(EventSystemStateTy::EXITED);
+  assert(OldState != EventSystemStateTy::EXITED &&
+         "Exit event received multiple times");
 
   // Event completion notification
-  MPI_Irecv(nullptr, 0, MPI_BYTE, DestRank, MPITag, TargetComm,
-            getNextRequest());
+  RequestManager.send(nullptr, 0, MPI_BYTE);
 
-  EVENT_END();
+  co_return (co_await RequestManager);
 }
 
-ExitEventTy::ExitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank,
-                         int DestRank,
-                         std::atomic<EventSystemStateTy> *EventSystemState)
-    : BaseEventTy(EventLocationTy::DEST, EventTypeTy::EXIT, MPITag, TargetComm,
-                  OrigRank, DestRank),
-      EventSystemState(EventSystemState) {}
-
-bool ExitEventTy::runDestination() {
-  assert(EventLocation == EventLocationTy::DEST);
-
-  EventSystemStateTy OldState;
-
-  EVENT_BEGIN();
-
-  OldState = EventSystemState->exchange(EventSystemStateTy::EXITED);
-  assertm(OldState != EventSystemStateTy::EXITED,
-          "Exit event received multiple times");
-
-  // Event completion notification
-  MPI_Isend(nullptr, 0, MPI_BYTE, OrigRank, MPITag, TargetComm,
-            getNextRequest());
-
-  EVENT_END();
-}
+} // namespace DestinationEvents
 
 // Event Queue implementation
 // =============================================================================
@@ -756,86 +446,44 @@ size_t EventQueue::size() {
   return Queue.size();
 }
 
-void EventQueue::push(EventPtr &Event) {
+void EventQueue::push(EventTy &&Event) {
   {
     std::unique_lock<std::mutex> lock(QueueMtx);
-    Queue.push(Event);
+    Queue.emplace(Event);
   }
 
   // Notifies a thread possibly blocked by an empty queue.
   CanPopCv.notify_one();
 }
 
-EventPtr EventQueue::pop() {
-  EventPtr TargetEvent = nullptr;
+EventTy EventQueue::pop() {
+  std::unique_lock<std::mutex> lock(QueueMtx);
 
-  {
-    std::unique_lock<std::mutex> lock(QueueMtx);
+  // Waits for at least one item to be pushed.
+  while (Queue.empty()) {
+    const bool has_new_event = CanPopCv.wait_for(
+        lock, std::chrono::microseconds(EventPollingRate.get()),
+        [&] { return !Queue.empty(); });
 
-    // Waits for at least one item to be pushed.
-    while (Queue.empty()) {
-      const bool has_new_event = CanPopCv.wait_for(
-          lock, std::chrono::microseconds(config::EVENT_POLLING_RATE),
-          [&] { return !Queue.empty(); });
-
-      if (!has_new_event) {
-        return nullptr;
-      }
+    if (!has_new_event) {
+      return {};
     }
-
-    assertm(!Queue.empty(), "Queue was empty on pop operation.");
-
-    TargetEvent = Queue.front();
-    Queue.pop();
   }
 
+  assert(!Queue.empty() && "Queue was empty on pop operation.");
+
+  EventTy TargetEvent = Queue.front();
+  Queue.pop();
   return TargetEvent;
 }
 
 // Event System implementation
 // =============================================================================
-// Event System statics.
-MPI_Comm EventSystemTy::GateThreadComm = MPI_COMM_NULL;
-int32_t EventSystemTy::MPITagMaxValue = 0;
-
-EventSystemTy::EventSystemTy() : EventSystemState(EventSystemStateTy::CREATED) {
-  // Read environment parameters
-  if (const char *env_str = std::getenv("OMPCLUSTER_MPI_FRAGMENT_SIZE")) {
-    config::MPI_FRAGMENT_SIZE = std::stoi(env_str);
-    assertm(config::MPI_FRAGMENT_SIZE >= 1,
-            "Maximum MPI buffer Size must be a least 1");
-    assertm(config::MPI_FRAGMENT_SIZE < std::numeric_limits<int>::max(),
-            "Maximum MPI buffer Size must be less then the largest int "
-            "value (MPI restrictions)");
-  }
-
-  if (const char *env_str = std::getenv("OMPCLUSTER_NUM_EXEC_EVENT_HANDLERS")) {
-    config::NUM_EXEC_EVENT_HANDLERS = std::stoi(env_str);
-    assertm(config::NUM_EXEC_EVENT_HANDLERS >= 1,
-            "At least one exec event handler should be spawned");
-  }
-
-  if (const char *env_str = std::getenv("OMPCLUSTER_NUM_DataEventHandlers")) {
-    config::NUM_DATA_EVENT_HANDLERS = std::stoi(env_str);
-    assertm(config::NUM_DATA_EVENT_HANDLERS >= 1,
-            "At least one data event handler should be spawned");
-  }
-
-  if (const char *env_str = std::getenv("OMPCLUSTER_EVENT_POLLING_RATE")) {
-    config::EVENT_POLLING_RATE = std::stoi(env_str);
-    assertm(config::EVENT_POLLING_RATE >= 0,
-            "Event system polling rate should not be negative");
-  }
-
-  if (const char *env_str = std::getenv("OMPCLUSTER_NUM_EVENT_COMM")) {
-    config::NUM_EVENT_COMM = std::stoi(env_str);
-    assertm(config::NUM_EVENT_COMM >= 1,
-            "At least on communicator need to be spawned");
-  }
-}
+EventSystemTy::EventSystemTy()
+    : EventSystemState(EventSystemStateTy::CREATED) {}
 
 EventSystemTy::~EventSystemTy() {
-  if (!IsInitialized)
+  if (EventSystemState == EventSystemStateTy::FINALIZED)
     return;
 
   REPORT("Destructing internal event system before deinitializing it.\n");
@@ -843,7 +491,7 @@ EventSystemTy::~EventSystemTy() {
 }
 
 bool EventSystemTy::initialize() {
-  if (IsInitialized) {
+  if (EventSystemState >= EventSystemStateTy::INITIALIZED) {
     REPORT("Trying to initialize event system twice.\n");
     return false;
   }
@@ -851,14 +499,19 @@ bool EventSystemTy::initialize() {
   if (!createLocalMPIContext())
     return false;
 
-  IsInitialized = true;
+  EventSystemState = EventSystemStateTy::INITIALIZED;
 
   return true;
 }
 
 bool EventSystemTy::deinitialize() {
-  if (!IsInitialized) {
+  if (EventSystemState == EventSystemStateTy::FINALIZED) {
     REPORT("Trying to deinitialize event system twice.\n");
+    return false;
+  }
+
+  if (EventSystemState == EventSystemStateTy::RUNNING) {
+    REPORT("Trying to deinitialize event system while it is running.\n");
     return false;
   }
 
@@ -867,15 +520,14 @@ bool EventSystemTy::deinitialize() {
     const int NumWorkers = WorldSize - 1;
     llvm::SmallVector<EventPtr> ExitEvents(NumWorkers);
     for (int WorkerRank = 0; WorkerRank < NumWorkers; WorkerRank++) {
-      ExitEvents[WorkerRank] = createEvent<ExitEventTy>(WorkerRank);
-      ExitEvents[WorkerRank]->progress();
+      ExitEvents[WorkerRank] = createEvent(OriginEvents::exit, WorkerRank);
+      ExitEvents[WorkerRank]->resume();
     }
 
     bool SuccessfullyExited = true;
     for (int WorkerRank = 0; WorkerRank < NumWorkers; WorkerRank++) {
       ExitEvents[WorkerRank]->wait();
-      SuccessfullyExited &=
-          ExitEvents[WorkerRank]->getEventState() == EventStateTy::FINISHED;
+      SuccessfullyExited &= ExitEvents[WorkerRank]->done();
     }
 
     if (!SuccessfullyExited) {
@@ -887,25 +539,29 @@ bool EventSystemTy::deinitialize() {
   if (!destroyLocalMPIContext())
     return false;
 
-  IsInitialized = false;
+  EventSystemState = EventSystemStateTy::FINALIZED;
 
   return true;
 }
 
 void EventSystemTy::runEventHandler(EventQueue &Queue) {
   while (EventSystemState == EventSystemStateTy::RUNNING || Queue.size() > 0) {
-    EventPtr event = Queue.pop();
+    EventTy Event = Queue.pop();
 
     // Re-checks the stop condition when no event was found.
-    if (event == nullptr) {
+    if (Event.empty()) {
       continue;
     }
 
-    event->progress();
+    Event.resume();
 
-    if (!event->isDone()) {
-      Queue.push(event);
+    if (!Event.done()) {
+      Queue.push(std::move(Event));
     }
+
+    if (Event.getError())
+      REPORT("Internal event failed with msg: %s\n",
+             toString(std::move(Event.getError())).data());
   }
 }
 
@@ -915,13 +571,12 @@ void EventSystemTy::runGateThread(__tgt_target_table *TargetTable) {
 
   // Spawns the event handlers.
   llvm::SmallVector<std::thread> EventHandlers;
-  EventHandlers.resize(config::NUM_EXEC_EVENT_HANDLERS +
-                       config::NUM_DATA_EVENT_HANDLERS);
+  EventHandlers.resize(NumExecEventHandlers.get() + NumDataEventHandlers.get());
   for (int Idx = 0; Idx < EventHandlers.size(); Idx++) {
-    EventHandlers[Idx] = std::thread(
-        &EventSystemTy::runEventHandler, this,
-        std::ref(Idx < config::NUM_EXEC_EVENT_HANDLERS ? ExecEventQueue
-                                                       : DataEventQueue));
+    EventHandlers[Idx] = std::thread(&EventSystemTy::runEventHandler, this,
+                                     std::ref(Idx < NumExecEventHandlers.get()
+                                                  ? ExecEventQueue
+                                                  : DataEventQueue));
   }
 
   // Executes the gate thread logic
@@ -937,7 +592,7 @@ void EventSystemTy::runGateThread(__tgt_target_table *TargetTable) {
     // check.
     if (!HasReceived) {
       std::this_thread::sleep_for(
-          std::chrono::microseconds(config::EVENT_POLLING_RATE));
+          std::chrono::microseconds(EventPollingRate.get()));
       continue;
     }
 
@@ -946,78 +601,67 @@ void EventSystemTy::runGateThread(__tgt_target_table *TargetTable) {
     // - Event tag
     // - Target comm
     // - Event source rank
-    uint32_t EventInfo[2];
-    MPI_Mrecv(EventInfo, 2, MPI_UINT32_T, &EventReqMsg, &EventStatus);
+    int EventInfo[2];
+    MPI_Mrecv(EventInfo, 2, MPI_INT, &EventReqMsg, &EventStatus);
     const auto NewEventType = static_cast<EventTypeTy>(EventInfo[0]);
-    const uint32_t NewEventTag = EventInfo[1];
-    auto &NewEventComm = getNewEventComm(NewEventTag);
-    const int OrigRank = EventStatus.MPI_SOURCE;
+    MPIRequestManagerTy RequestManager(getNewEventComm(EventInfo[1]),
+                                       EventInfo[1], EventStatus.MPI_SOURCE);
 
     // Creates a new receive event of 'event_type' type.
-    EventPtr NewEvent;
+    using namespace DestinationEvents;
+    EventTy NewEvent;
     switch (NewEventType) {
     case EventTypeTy::ALLOC:
-      NewEvent = std::make_shared<AllocEventTy>(NewEventTag, NewEventComm,
-                                                OrigRank, LocalRank);
+      NewEvent = allocateBuffer(std::move(RequestManager));
       break;
     case EventTypeTy::DELETE:
-      NewEvent = std::make_shared<DeleteEventTy>(NewEventTag, NewEventComm,
-                                                 OrigRank, LocalRank);
-      break;
-    case EventTypeTy::RETRIEVE:
-      NewEvent = std::make_shared<RetrieveEventTy>(NewEventTag, NewEventComm,
-                                                   OrigRank, LocalRank);
+      NewEvent = deleteBuffer(std::move(RequestManager));
       break;
     case EventTypeTy::SUBMIT:
-      NewEvent = std::make_shared<SubmitEventTy>(NewEventTag, NewEventComm,
-                                                 OrigRank, LocalRank);
+      NewEvent = submit(std::move(RequestManager));
+      break;
+    case EventTypeTy::RETRIEVE:
+      NewEvent = retrieve(std::move(RequestManager));
       break;
     case EventTypeTy::EXCHANGE:
-      NewEvent = std::make_shared<ExchangeEventTy>(NewEventTag, NewEventComm,
-                                                   OrigRank, LocalRank);
+      NewEvent = exchange(std::move(RequestManager), *this);
       break;
     case EventTypeTy::EXECUTE:
-      NewEvent = std::make_shared<ExecuteEventTy>(
-          NewEventTag, NewEventComm, OrigRank, LocalRank, TargetTable);
+      NewEvent = execute(std::move(RequestManager), TargetTable);
       break;
     case EventTypeTy::EXIT:
-      NewEvent = std::make_shared<ExitEventTy>(
-          NewEventTag, NewEventComm, OrigRank, LocalRank, &EventSystemState);
+      NewEvent = exit(std::move(RequestManager), EventSystemState);
       break;
     case EventTypeTy::SYNC:
-      assertm(false, "Trying to create a local event on a remote node");
+      assert(false && "Trying to create a local event on a remote node");
     }
 
-    assertm(NewEvent != nullptr, "Created event must not be a nullptr");
-    assertm(NewEvent->EventLocation == EventLocationTy::DEST,
-            "Gate thread must receive only receive events");
-
     if (NewEventType == EventTypeTy::EXECUTE) {
-      ExecEventQueue.push(NewEvent);
+      ExecEventQueue.push(std::move(NewEvent));
     } else {
-      DataEventQueue.push(NewEvent);
+      DataEventQueue.push(std::move(NewEvent));
     }
   }
 
-  assertm(EventSystemState == EventSystemStateTy::EXITED,
-          "Event State should be EXITED after receiving an Exit event");
+  assert(EventSystemState == EventSystemStateTy::EXITED &&
+         "Event State should be EXITED after receiving an Exit event");
 
   // Waits for the Event Handler threads.
   for (auto &EventHandler : EventHandlers) {
     if (EventHandler.joinable()) {
       EventHandler.join();
     } else {
-      assertm(false, "Event Handler threads not joinable at the end of gate "
-                     "thread logic.");
+      assert(false && "Event Handler threads not joinable at the end of gate "
+                      "thread logic.");
     }
   }
 }
 
 // Creates a new event tag of at least 'FIRST_EVENT' value.
 // Tag values smaller than 'FIRST_EVENT' are reserved for control
-// communication between the event systems of different MPI processes.
+// messages between the event systems of different MPI processes.
 int EventSystemTy::createNewEventTag() {
-  uint32_t tag = 0;
+  int tag = 0;
 
   do {
     tag = EventCounter.fetch_add(1) % MPITagMaxValue;
@@ -1072,7 +716,7 @@ bool EventSystemTy::createLocalMPIContext() {
         "Failed to create gate thread MPI comm with error %d\n", MPIError);
 
   // Create event comm pool.
-  EventCommPool.resize(config::NUM_EVENT_COMM, MPI_COMM_NULL);
+  EventCommPool.resize(NumMPIComms.get(), MPI_COMM_NULL);
   for (auto &Comm : EventCommPool) {
     MPI_Comm_dup(MPI_COMM_WORLD, &Comm);
     CHECK(MPIError == MPI_SUCCESS,

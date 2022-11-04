@@ -28,6 +28,8 @@ libomptarget_say("Building MPI offloading plugin.")
 add_definitions(-DTARGET_NAME=MPI)
 # Define macro with the ELF ID for this target.
 add_definitions("-DTARGET_ELF_ID=62")
+# Define debug prefix.
+add_definitions(-DDEBUG_PREFIX="TARGET MPI RTL")
 
 add_llvm_library(omptarget.rtl.mpi SHARED
   src/EventSystem.cpp
@@ -67,6 +69,11 @@ if(LIBOMPTARGET_DEP_MPI_COMPILE_FLAGS)
   set_target_properties(omptarget.rtl.mpi PROPERTIES
                         COMPILE_FLAGS "${LIBOMPTARGET_DEP_MPI_COMPILE_FLAGS}")
 endif()
+
+set_target_properties(omptarget.rtl.mpi
+                      PROPERTIES
+                      CXX_STANDARD 20
+                      CXX_STANDARD_REQUIRED ON)
 
 # Report to the parent scope that we are building a plugin for MPI.
 set(LIBOMPTARGET_SYSTEM_TARGETS "${LIBOMPTARGET_SYSTEM_TARGETS} x86_64-pc-linux-gnu-mpi" PARENT_SCOPE)

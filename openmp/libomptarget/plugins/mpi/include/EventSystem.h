@@ -15,8 +15,12 @@
 #define _OMPTARGET_OMPCLUSTER_EVENT_SYSTEM_H_
 
 #include <atomic>
+#include <cassert>
+#include <concepts>
 #include <condition_variable>
+#include <coroutine>
 #include <cstdint>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -28,30 +32,30 @@
 
 #include "llvm/ADT/SmallVector.h"
 
+#include "Utilities.h"
+
 // External forward declarations.
 // =============================================================================
-class MPIManagerTy;
 struct __tgt_target_table;
 
 // Internal forward declarations and type aliases.
 // =============================================================================
-class BaseEventTy;
-enum class EventSystemStateTy;
+struct EventTy;
 
 /// Automaticaly managed event pointer.
 ///
 /// \note: Every event must always be accessed/stored in a shared_ptr structure.
 /// This allows for automatic memory management among the many threads of the
 /// libomptarget runtime.
-using EventPtr = std::shared_ptr<BaseEventTy>;
+using EventPtr = std::shared_ptr<EventTy>;
 
-// Event Types
+// Helper
 // =============================================================================
-/// The event location.
-///
-/// Enumerates whether an event is executing at its two possible locations:
-/// its origin or its destination.
-enum class EventLocationTy : bool { ORIG = 0, DEST };
+template <typename... ArgsTy>
+static llvm::Error createError(const char *ErrFmt, ArgsTy... Args) {
+  return llvm::createStringError(llvm::inconvertibleErrorCode(), ErrFmt,
+                                 Args...);
+}
 
 /// The event type (type of action it will performed).
 ///
@@ -64,8 +68,8 @@ enum class EventTypeTy : int {
   DELETE, // Deletes a buffer at the remote process.
 
   // Data movement.
-  RETRIEVE, // Receives a buffer data from a remote process.
   SUBMIT,   // Sends a buffer data to a remote process.
+  RETRIEVE, // Receives a buffer data from a remote process.
   EXCHANGE, // Exchange a buffer between two remote processes.
 
   // Target region execution.
@@ -78,359 +82,179 @@ enum class EventTypeTy : int {
   EXIT // Stops the event system execution at the remote process.
 };
 
-/// The event execution state.
-///
-/// Enumerates the event states during its lifecycle through the event system.
-/// New states should be added to the enum in the order they happen at the event
-/// system.
-enum class EventStateTy : int {
-  CREATED = 0, // Event was only create but it was not executed yet.
-  EXECUTING,   // Event is currently being executed in the background and it
-               // is registering new MPI requests.
-  WAITING,     // Event was executed and is now waiting on the MPI requests
-               // complete.
-  FAILED,      // Event failed during execution
-  FINISHED     // The event and its MPI requests are completed.
-};
-
-/// EventLocation to string conversion.
-///
-/// \returns the string representation of \p location.
-const char *toString(EventLocationTy location);
-
 /// EventType to string conversion.
 ///
 /// \returns the string representation of \p type.
 const char *toString(EventTypeTy type);
 
-/// EventState to string conversion.
-///
-/// \returns the string representation of \p state.
-const char *toString(EventStateTy state);
-
-// Events
+// Coroutine events
 // =============================================================================
+// Return object for the event system coroutines. This class works as an
+// external handle for the coroutine execution, allowing anyone to: query for
+// the coroutine completion, resume the coroutine and check its state. Moreover,
+// this class allows for coroutines to be chainable, meaning a coroutine
+// function may wait on the completion of another one by using the co_await
+// operator, all through a single external handle.
+struct EventTy {
+  // Internal event handle to access C++ coroutine states.
+  struct promise_type;
+  using CoHandleTy = std::coroutine_handle<promise_type>;
+  CoHandleTy Handle;
 
-/// The base event of all event types.
-///
-/// This class contains both the common data stored and common procedures
-/// executed at all events. New events that derive from this class must comply
-/// with the following:
-/// - Declare the new EventType item;
-/// - Name the derived class as the concatenation of the new EventType name and
-///   the "Event" word. E.g.: ALLOC event -> class AllocEvent;
-/// - Implement both pure virtual functions:
-///    - #runOrigin;
-///    - #runDestination;
-/// - Implement two constructors (one for each EventLocation) with this
-///   prototype:
-///
-///   Event(int MPITag, MPI_Comm TargetComm, int OrigRank, int
-///   DestRank,...);
-///
-class BaseEventTy {
-public:
-  /// The only (non-child) class that can access the Event protected members.
-  friend class EventSystemTy;
+  // Internal (and required) promise type. Allows for customization of the
+  // coroutines behavior and to store custom data inside the coroutine itself.
+  struct promise_type {
+    // Coroutines are chained as a reverse linked-list. The most-recent
+    // coroutine in a chain points to the previous one and so on, until the root
+    // (and first) coroutine, which then points to the most-recent one. The root
+    // always refers to the coroutine stored in the external handle, the only
+    // handle an external user have access to.
+    CoHandleTy prevHandle;
+    CoHandleTy rootHandle;
+    // Indicates if the coroutine was completed successfully. Contains the
+    // appropriate error otherwise.
+    llvm::Error CoroutineError;
 
-  // Event definitions.
-  /// Location that the event is being executed: origin or destination ranks.
-  const EventLocationTy EventLocation;
-  /// Event type that represents its actions.
-  const EventTypeTy EventType;
+    promise_type() : CoroutineError(llvm::Error::success()) {
+      prevHandle = rootHandle = CoHandleTy::from_promise(*this);
+    }
 
-  // MPI definitions.
-  /// MPI communicator to be used by the event.
-  const MPI_Comm TargetComm;
-  /// MPI tag that must be used on every MPI communication of the event.
-  const int MPITag;
-  /// Rank of the process that created the event.
-  const int OrigRank;
-  /// Rank of the process that was target by the event.
-  const int DestRank;
+    // Event coroutines should always suspend upon creation and finalization.
+    std::suspend_always initial_suspend() { return {}; }
+    std::suspend_always final_suspend() noexcept { return {}; }
 
-protected:
-  using LabelPointer = void *;
-  /// Event coroutine state.
-  LabelPointer ResumeLocation = nullptr;
+    // Coroutines should return llvm::Error::success() or an appropriate error
+    // message.
+    void return_value(llvm::Error &&GivenError) noexcept {
+      CoroutineError = std::move(GivenError);
+    }
 
-private:
-  /// MPI non-blocking requests to be synchronized during event execution.
-  llvm::SmallVector<MPI_Request> PendingRequests;
+    // Any unhandled exception should create an externally visible error.
+    void unhandled_exception() {
+      assert(std::uncaught_exceptions() > 0 &&
+             "Function should only be called if an uncaught exception is "
+             "generated inside the coroutine");
+      CoroutineError = createError("Event generated an unhandled exception");
+    }
 
-  /// The event execution state.
-  std::atomic<EventStateTy> EventState{EventStateTy::CREATED};
+    // Returns the external coroutine handle from the promise object.
+    EventTy get_return_object() {
+      return {.Handle = CoHandleTy::from_promise(*this)};
+    }
+  };
 
-  /// Call-guard for the #progress function.
-  ///
-  /// This atomic ensures only one thread executes the #progress code at a time.
-  std::atomic<bool> ProgressGuard{false};
+  // Automatically destroys valid coroutine handles.
+  ~EventTy();
 
-  /// Parameters used to create the event at the destination process.
-  ///
-  /// \note this array is needed so non-blocking MPI messages can be used to
-  /// create the event.
-  uint32_t InitialRequestInfo[2] = {0, 0};
-
-public:
-  BaseEventTy &operator=(BaseEventTy &) = delete;
-  BaseEventTy(BaseEventTy &) = delete;
-
-  /// Advance the progress of the event.
-  ///
-  /// \note calling this function once does n;;;;;ot guarantee that the event is
-  /// completely executed. One must call this function until #isDone returns
-  /// true.
-  void progress();
-
-  /// Check if the event is completed.
-  ///
-  /// \return true if the event is completed.
-  bool isDone() const;
-
-  /// Wait for the event to be completed.
-  ///
-  /// Waits for the completion of the event on both the local and remote
-  /// processes. This function will choose between the blocking and tasking
-  /// implementations depending if the current code is inside a task or not.
-  ///
-  /// \note this function is almost equivalent to calling #runStage while
-  /// #isDone is returning false.
+  // Execution handling.
+  // Resume the coroutine execution up until the next suspension point.
+  void resume();
+  // Blocks the caller thread until the coroutine is completed.
   void wait();
+  // Checks if the coroutine is completed or not.
+  bool done() const;
 
-  /// Get the current event execution state.
-  ///
-  /// \returns The current EventState.
-  EventStateTy getEventState() const;
+  // Coroutine state handling.
+  // Checks if the coroutine is valid.
+  bool empty() const;
+  // Get the returned error from the coroutine.
+  llvm::Error &getError() const;
 
-protected:
-  /// BaseEvent constructor.
-  BaseEventTy(EventLocationTy EventLocation, EventTypeTy EventType, int MPITag,
-              MPI_Comm TargetComm, int OrigRank, int DestRank);
+  // EventTy instances are also awaitables. This means one can link multiple
+  // EventTy together by calling the co_await operator on one another. For this
+  // to work, EventTy must implement the following three functions.
 
-  /// BaseEvent default destructor.
-  virtual ~BaseEventTy() = default;
+  // Called on the new coroutine before suspending the current one on co_await.
+  // If returns true, the new coroutine is already completed, thus it should not
+  // be linked against the current one and the current coroutine can continue
+  // without suspending.
+  bool await_ready() { return Handle.done(); }
+  // Called on the new coroutine when the current one is suspended. It is
+  // responsible for chaining coroutines together.
+  void await_suspend(CoHandleTy suspendedHandle) {
+    auto &currPromise = Handle.promise();
+    auto &suspendedPromise = suspendedHandle.promise();
+    auto &rootPromise = suspendedPromise.rootHandle.promise();
 
-  /// Push a new MPI request to the request array.
-  ///
-  /// \returns a reference to the next available MPI request at
-  /// #pending_requests.
-  MPI_Request *getNextRequest();
+    currPromise.prevHandle = suspendedHandle;
+    currPromise.rootHandle = suspendedPromise.rootHandle;
 
-  /// Test if all pending requests have finished.
-  ///
-  /// \return true if all pending MPI requests are completed, false otherwise.
-  bool checkPendingRequests();
-
-private:
-  /// Sends a new event notification to the destination.
-  void notifyNewEvent();
-
-  /// Calls #runOrigin or #runDestination coroutine.
-  ///
-  /// \returns true if the event run coroutine has finished, false otherwise.
-  bool runCoroutine();
-
-  // Event coroutines
-  /// Executes the origin side of the event locally.
-  virtual bool runOrigin() = 0;
-  /// Executes the destination side of the event locally.
-  virtual bool runDestination() = 0;
+    rootPromise.prevHandle = Handle;
+  }
+  // Called on the new coroutine when the current one is resumed. Used to return
+  // errors when co_awaiting on other EventTy.
+  llvm::Error await_resume() {
+    return std::move(Handle.promise().CoroutineError);
+  }
 };
 
-/// Allocates a buffer at a remote process.
-class AllocEventTy final : public BaseEventTy {
-private:
-  /// Size of the buffer to be allocated.
-  int64_t Size = 0;
-  /// Pointer to variable to be filled with the address of the allocated buffer.
-  void **AllocatedAddressPtr = nullptr;
-  // Allocated address to be send back.
-  void *DestAddress = 0;
+// Coroutine like manager for many non-blocking MPI calls. Allows for coroutine
+// to co_await on the registered MPI requests.
+class MPIRequestManagerTy {
+  // Target specification for the MPI messages.
+  const MPI_Comm Comm;
+  const int Tag;
+  const int OtherRank;
+  // Pending MPI requests.
+  llvm::SmallVector<MPI_Request> Requests;
 
 public:
-  /// Origin constructor.
-  AllocEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-               int64_t Size, void **AllocatedAddress);
+  MPIRequestManagerTy(MPI_Comm Comm, int Tag, int OtherRank,
+                      llvm::SmallVector<MPI_Request> InitialRequests = {})
+      : Comm(Comm), Tag(Tag), OtherRank(OtherRank), Requests(InitialRequests) {}
 
-  /// Destination constructor.
-  AllocEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank);
+  ~MPIRequestManagerTy();
 
-private:
-  /// Sends the size and receives the allocated address.
-  bool runOrigin() override;
-  /// Receives the size, allocating the data and sending its address.
-  bool runDestination() override;
+  // Sends a buffer of given datatype items with determined size to target.
+  void send(const void *Buffer, int Size, MPI_Datatype Datatype);
+
+  // Receives a buffer of given datatype items with determined size from target.
+  void receive(void *Buffer, int Size, MPI_Datatype Datatype);
+
+  // Coroutine that waits on all internal pending requests.
+  EventTy wait();
 };
 
-/// Frees a buffer at a remote process.
-class DeleteEventTy final : public BaseEventTy {
-private:
-  /// Address of the buffer to be freed.
-  void *TargetAddress = 0;
+// Coroutine events created at the origin rank of the event.
+namespace OriginEvents {
 
-public:
-  /// Origin constructor.
-  DeleteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-                void *TargetAddress);
+EventTy allocateBuffer(MPIRequestManagerTy RequestManager, int64_t Size,
+                       void **Buffer);
+EventTy deleteBuffer(MPIRequestManagerTy RequestManager, void *Buffer);
+EventTy submit(MPIRequestManagerTy RequestManager, void *OrgBuffer,
+               void *DstBuffer, int64_t Size);
+EventTy retrieve(MPIRequestManagerTy RequestManager, void *OrgBuffer,
+                 void *DstBuffer, int64_t Size);
+EventTy exchange(MPIRequestManagerTy RequestManager, int DstRank,
+                 void *OrgBuffer, void *DstBuffer, int64_t Size);
+EventTy execute(MPIRequestManagerTy RequestManager,
+                llvm::SmallVector<void *> Args, uint32_t TargetEntryIdx);
+EventTy sync(EventPtr Event);
+EventTy exit(MPIRequestManagerTy RequestManager);
 
-  /// Destination constructor.
-  DeleteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank);
+// Transform a function pointer to its representing enumerator.
+template <typename FuncTy> constexpr EventTypeTy toEventType(FuncTy) {
+  if constexpr (std::is_same_v<FuncTy, decltype(allocateBuffer)>)
+    return EventTypeTy::ALLOC;
+  else if constexpr (std::is_same_v<FuncTy, decltype(deleteBuffer)>)
+    return EventTypeTy::DELETE;
+  else if constexpr (std::is_same_v<FuncTy, decltype(submit)>)
+    return EventTypeTy::SUBMIT;
+  else if constexpr (std::is_same_v<FuncTy, decltype(retrieve)>)
+    return EventTypeTy::RETRIEVE;
+  else if constexpr (std::is_same_v<FuncTy, decltype(exchange)>)
+    return EventTypeTy::EXCHANGE;
+  else if constexpr (std::is_same_v<FuncTy, decltype(execute)>)
+    return EventTypeTy::EXECUTE;
+  else if constexpr (std::is_same_v<FuncTy, decltype(sync)>)
+    return EventTypeTy::SYNC;
+  else if constexpr (std::is_same_v<FuncTy, decltype(exit)>)
+    return EventTypeTy::EXIT;
 
-private:
-  /// Sends the address and waits for a notification of the data deletion.
-  bool runOrigin() override;
-  /// Receives the address, frees it and send a completion notification.
-  bool runDestination() override;
-};
+  assert(false && "Invalid event function");
+}
 
-/// Retrieves a buffer from a remote process.
-class RetrieveEventTy final : public BaseEventTy {
-private:
-  /// Address of the origin's buffer to be filled with the destination's data.
-  void *OrigPtr = nullptr;
-  /// Address of the destination's buffer to be retrieved.
-  const void *DestPtr = nullptr;
-  /// Size of both the origin's and destination's buffers.
-  int64_t Size = 0;
-
-public:
-  /// Origin constructor.
-  RetrieveEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-                  void *OrigPtr, const void *DestPtr, int64_t Size);
-
-  /// Destination constructor.
-  RetrieveEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank);
-
-private:
-  /// Sends the buffer info and retries its data.
-  bool runOrigin() override;
-  /// Receives the buffer info and sends its data.
-  bool runDestination() override;
-};
-
-/// Send a buffer to a remote process.
-class SubmitEventTy final : public BaseEventTy {
-private:
-  /// Address of the origin's buffer to be submitted.
-  const void *OrigPtr = nullptr;
-  /// Address of the destination's buffer to be filled with the origin's data.
-  void *DestPtr = nullptr;
-  /// Size of both the origin's and destination's buffers.
-  int64_t Size = 0;
-
-public:
-  /// Origin constructor.
-  // TODO: Change to dest first then origin (target then host)
-  SubmitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-                const void *OrigPtr, void *DestPtr, int64_t Size);
-
-  /// Destination constructor.
-  SubmitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank);
-
-private:
-  /// Sends the buffer info and then the buffer itself.
-  bool runOrigin() override;
-  /// Receives the buffer info and then the buffer itself.
-  bool runDestination() override;
-
-  friend class PackedSubmitEvent;
-};
-
-/// Exchange a buffer between two remote processes.
-class ExchangeEventTy final : public BaseEventTy {
-private:
-  /// MPI rank of the data destination process.
-  int DataDestRank = 0;
-  /// Address of the data at the data source process.
-  const void *SrcPtr = nullptr;
-  /// Address of the data at the data destination process.
-  void *DstPtr = nullptr;
-  /// Size of both the data source's and data destination's buffers.
-  int64_t Size = 0;
-  /// Pointer to the remote submit event created at the remote source location.
-  EventPtr RemoteSubmitEvent = nullptr;
-
-public:
-  /// Origin constructor.
-  ExchangeEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-                  int DataDestRank, const void *SrcPtr, void *DstPtr,
-                  int64_t Size);
-
-  /// Destination constructor.
-  ExchangeEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank);
-
-private:
-  /// Sends the buffer info.
-  bool runOrigin() override;
-  /// Receives the buffer info and start a SubmitEvent to the dest process.
-  bool runDestination() override;
-};
-
-/// Executes a target region at a remote process.
-class ExecuteEventTy final : public BaseEventTy {
-private:
-  /// Number of arguments of the target region.
-  int32_t NumArgs = 0;
-  /// Arguments of the target region.
-  llvm::SmallVector<void *> Args{};
-  /// Index of the target region.
-  uint32_t TargetEntryIdx = -1;
-  // Local target table with entry addresses.
-  __tgt_target_table *TargetTable = nullptr;
-
-public:
-  /// Origin constructor.
-  ExecuteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-                 int32_t NumArgs, void **Args, uint32_t TargetEntryIdx);
-
-  /// Destination constructor.
-  ExecuteEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-                 __tgt_target_table *TargetTable);
-
-private:
-  /// Sends the target region info and wait for the completion notification.
-  bool runOrigin() override;
-  /// Receives the target region info, executes it and sends the notification.
-  bool runDestination() override;
-};
-
-/// Local event used to wait on other events.
-class SyncEventTy final : public BaseEventTy {
-private:
-  EventPtr TargetEvent;
-
-public:
-  /// Destination constructor.
-  SyncEventTy(EventPtr &TargetEvent);
-
-private:
-  /// Does nothing.
-  bool runOrigin() override;
-  /// Waits for target_event to complete.
-  bool runDestination() override;
-};
-
-/// Notify a remote process to stop its event system.
-class ExitEventTy final : public BaseEventTy {
-private:
-  /// Pointer to the event system state.
-  std::atomic<EventSystemStateTy> *EventSystemState = nullptr;
-
-public:
-  /// Origin constructor.
-  ExitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank);
-
-  /// Destination constructor.
-  ExitEventTy(int MPITag, MPI_Comm TargetComm, int OrigRank, int DestRank,
-              std::atomic<EventSystemStateTy> *EventSystemState);
-
-private:
-  /// Just waits for the completion notification.
-  bool runOrigin() override;
-  /// Stops its event system and sends the notification.
-  bool runDestination() override;
-};
+} // namespace OriginEvents
 
 // Event Queue
 // =============================================================================
@@ -438,7 +262,7 @@ private:
 class EventQueue {
 private:
   /// Base internal queue.
-  std::queue<EventPtr> Queue;
+  std::queue<EventTy> Queue;
   /// Base queue sync mutex.
   std::mutex QueueMtx;
 
@@ -453,10 +277,10 @@ public:
   size_t size();
 
   /// Push an event to the queue, resizing it when needed.
-  void push(EventPtr &Event);
+  void push(EventTy &&Event);
 
   /// Pops an event from the queue, returning nullptr if the queue is empty.
-  EventPtr pop();
+  EventTy pop();
 };
 
 // Event System
@@ -481,40 +305,43 @@ enum class EventSystemStateTy {
   INITIALIZED, // ES was initialized alongside internal MPI states. It is ready
                // to send new events, but not receive them.
   RUNNING,     // ES is running and ready to receive new events.
-  EXITED       // ES was stopped.
+  EXITED,      // ES was stopped.
+  FINALIZED    // ES was finalized and cannot run anything else.
 };
 
 /// The distributed event system.
 class EventSystemTy {
-public:
-  /// The largest MPI tag allowed by its implementation.
-  static int32_t MPITagMaxValue;
-
-  /// Communicator used by the gate thread.
-  // TODO: Find a better way to share this with all the events. static is not
-  // that great.
-  static MPI_Comm GateThreadComm;
-
-private:
   // MPI definitions.
-  /// Communicator pool distributed over the events.
+  /// The largest MPI tag allowed by its implementation.
+  int32_t MPITagMaxValue = 0;
+  /// Communicator used by the gate thread and base communicator for the event
+  /// system.
+  MPI_Comm GateThreadComm = MPI_COMM_NULL;
+  /// Communicator pool distributed over the events. Many MPI implementations
+  /// allow for better network hardware parallelism when unrelated MPI messages
+  /// are exchanged over distinct communicators. Thus this pool will be given in
+  /// a round-robin fashion to each newly created event to better utilize the
+  /// hardware capabilities.
   llvm::SmallVector<MPI_Comm> EventCommPool{};
   /// Number of process used by the event system.
   int WorldSize = -1;
   /// The local rank of the current instance.
   int LocalRank = -1;
 
-  /// Number of event created by the current instance.
-  std::atomic<uint32_t> EventCounter{0};
+  /// Number of events created by the current instance so far. This is used to
+  /// generate unique MPI tags for each event.
+  std::atomic<int> EventCounter{0};
 
-  /// Event queue between the local gate thread and event handlers.
+  /// Event queue between the local gate thread and the event handlers. The exec
+  /// queue is responsible for only running the execution events, while the data
+  /// queue executes all the other ones. This allows for long running execution
+  /// events to not block any data transfers (which are all done in a
+  /// non-blocking fashion).
   EventQueue ExecEventQueue{};
   EventQueue DataEventQueue{};
 
   /// Event System execution state.
   std::atomic<EventSystemStateTy> EventSystemState{};
-
-  bool IsInitialized = false;
 
 private:
   /// Function executed by the event handler threads.
@@ -549,8 +376,9 @@ public:
   ///
   /// /note: since this is a template function, it must be defined in
   /// this header.
-  template <class EventClass, typename... ArgsTy>
-  EventPtr createEvent(int DestRank, ArgsTy &&...Args);
+  template <class EventFuncTy, typename... ArgsTy>
+  requires std::invocable<EventFuncTy, MPIRequestManagerTy, ArgsTy...> EventPtr
+  createEvent(EventFuncTy EventFunc, int DstDeviceID, ArgsTy &&...Args);
 
   /// Gate thread procedure.
   ///
@@ -570,28 +398,38 @@ public:
   int isHead() const;
 };
 
-template <class EventClassTy, typename... ArgsTy>
-EventPtr EventSystemTy::createEvent(int DstDeviceID, ArgsTy &&...Args) {
-  static_assert(std::is_convertible_v<EventClassTy *, BaseEventTy *>,
-                "Cannot create an event from a class that is not derived from "
-                "the BaseEvent class.");
-  using MPITagTy = int;
-  using RankTy = int;
-  static_assert(std::is_constructible_v<EventClassTy, MPITagTy, MPI_Comm,
-                                        RankTy, RankTy, ArgsTy...>,
-                "Cannot create an event from the given argument types.");
+template <class EventFuncTy, typename... ArgsTy>
+requires std::invocable<EventFuncTy, MPIRequestManagerTy, ArgsTy...>
+    EventPtr EventSystemTy::createEvent(EventFuncTy EventFunc, int DstDeviceID,
+                                        ArgsTy &&...Args) {
+  auto NotificationSender = [this](EventFuncTy EventFunc, int DstDeviceID,
+                                   ArgsTy &&...Args) -> EventTy {
+    // Create event MPI request manager.
+    // MPI rank 0 is our head node/host. Worker rank starts at 1.
+    const int DstDeviceRank = DstDeviceID + 1;
+    const int EventTag = createNewEventTag();
+    auto &EventComm = getNewEventComm(EventTag);
 
-  // MPI rank 0 is our head node/host. Worker rank starts at 1.
-  const int DstDeviceRank = DstDeviceID + 1;
+    // Send new event notification.
+    int EventNotificationInfo[] = {
+        static_cast<int>(OriginEvents::toEventType(EventFunc)), EventTag};
+    MPI_Request NotificationRequest = MPI_REQUEST_NULL;
+    int MPIError = MPI_Isend(EventNotificationInfo, 2, MPI_INT, DstDeviceID,
+                             static_cast<int>(ControlTagsTy::EVENT_REQUEST),
+                             GateThreadComm, &NotificationRequest);
 
-  const int EventTag = createNewEventTag();
-  auto &EventComm = getNewEventComm(EventTag);
+    if (MPIError != MPI_SUCCESS)
+      co_return createError(
+          "MPI failed during event notification with error %d", MPIError);
 
-  EventPtr Event = std::make_shared<EventClassTy>(
-      EventTag, EventComm, LocalRank, DstDeviceRank,
-      std::forward<ArgsTy>(Args)...);
+    MPIRequestManagerTy RequestManager(EventComm, EventTag, DstDeviceRank,
+                                       {NotificationRequest});
 
-  return Event;
+    co_return (co_await EventFunc(std::move(RequestManager), Args...));
+  };
+
+  return std::make_shared<EventTy>(std::move(NotificationSender(
+      EventFunc, DstDeviceID, std::forward<ArgsTy>(Args)...)));
 }
 
 #endif // _OMPTARGET_OMPCLUSTER_EVENT_SYSTEM_H_

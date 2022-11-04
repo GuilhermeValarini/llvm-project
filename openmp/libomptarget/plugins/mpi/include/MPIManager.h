@@ -19,9 +19,9 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/DynamicLibrary.h"
 
-#include "Common.h"
 #include "EventSystem.h"
 
+#include "Debug.h"
 #include "MemoryManager.h"
 #include "omptarget.h"
 
@@ -143,8 +143,6 @@ private:
   bool checkValidDeviceId(const int DeviceId) const;
 
   bool checkValidAsyncInfo(const __tgt_async_info *AsyncInfo) const;
-
-  int32_t checkCreatedEvent(const EventPtr &Event) const;
 
   bool checkRecordedEventPtr(const void *Event) const;
 

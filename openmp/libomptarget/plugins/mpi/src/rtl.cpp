@@ -14,7 +14,7 @@
 #include <type_traits>
 #include <utility>
 
-#include "Common.h"
+#include "Debug.h"
 #include "MPIManager.h"
 
 #include "omptargetplugin.h"
