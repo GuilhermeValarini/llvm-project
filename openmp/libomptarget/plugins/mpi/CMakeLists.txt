@@ -57,7 +57,7 @@ add_llvm_library(omptarget.rtl.mpi SHARED
 
 # Add include directories
 target_include_directories(omptarget.rtl.mpi
-  PRIVATE include ${LIBOMPTARGET_INCLUDE_DIR}
+  PRIVATE ${LIBOMPTARGET_INCLUDE_DIR}
 )
 
 # Install plugin under the lib destination folder.
