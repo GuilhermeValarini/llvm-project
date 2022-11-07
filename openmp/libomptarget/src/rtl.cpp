@@ -113,6 +113,15 @@ void RTLsTy::loadRTLs() {
   DP("RTLs loaded!\n");
 }
 
+static void attemptDeinitRTL(RTLInfoTy &RTL) {
+  if (RTL.deinit_plugin) {
+    int32_t Rc = RTL.deinit_plugin();
+    if (Rc != OFFLOAD_SUCCESS) {
+      DP("Failed to deinitialize library '%s': %d!\n", RTL.RTLName.c_str(), Rc);
+    }
+  }
+}
+
 bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
   const char *Name = RTLName.c_str();
 
@@ -140,6 +149,10 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
       return false;
     }
   }
+
+  // Pre-load optional deinit_plugin for deinitialization of invalid plugins.
+  *((void **)&RTL.deinit_plugin) =
+      DynLibrary->getAddressOfSymbol("__tgt_rtl_deinit_plugin");
 
   bool ValidPlugin = true;
 
@@ -174,9 +187,14 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
             DynLibrary->getAddressOfSymbol("__tgt_rtl_run_target_team_region")))
     ValidPlugin = false;
 
+#ifdef LIBOMPTARGET_DEBUG
+  RTL.RTLName = Name;
+#endif
+
   // Invalid plugin
   if (!ValidPlugin) {
     DP("Invalid plugin as necessary interface is not found.\n");
+    attemptDeinitRTL(RTL);
     return false;
   }
 
@@ -184,18 +202,13 @@ bool RTLsTy::attemptLoadRTL(const std::string &RTLName, RTLInfoTy &RTL) {
   if (!(RTL.NumberOfDevices = RTL.number_of_devices())) {
     // The RTL is invalid! Will pop the object from the RTLs list.
     DP("No devices supported in this RTL\n");
+    attemptDeinitRTL(RTL);
     return false;
   }
-
-#ifdef LIBOMPTARGET_DEBUG
-  RTL.RTLName = Name;
-#endif
 
   DP("Registering RTL %s supporting %d devices!\n", Name, RTL.NumberOfDevices);
 
   // Optional functions
-  *((void **)&RTL.deinit_plugin) =
-      DynLibrary->getAddressOfSymbol("__tgt_rtl_deinit_plugin");
   *((void **)&RTL.is_valid_binary_info) =
       DynLibrary->getAddressOfSymbol("__tgt_rtl_is_valid_binary_info");
   *((void **)&RTL.deinit_device) =
@@ -581,13 +594,8 @@ void RTLsTy::unregisterLib(__tgt_bin_desc *Desc) {
   PM->TblMapMtx.unlock();
 
   // TODO: Write some RTL->unload_image(...) function?
-  for (auto *R : UsedRTLs) {
-    if (R->deinit_plugin) {
-      if (R->deinit_plugin() != OFFLOAD_SUCCESS) {
-        DP("Failure deinitializing RTL %s!\n", R->RTLName.c_str());
-      }
-    }
-  }
+  for (auto *R : UsedRTLs)
+    attemptDeinitRTL(*R);
 
   DP("Done unregistering library!\n");
 }
