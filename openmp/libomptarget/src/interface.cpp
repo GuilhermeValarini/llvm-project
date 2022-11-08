@@ -16,6 +16,8 @@
 #include "private.h"
 #include "rtl.h"
 
+#include "Utilities.h"
+
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
@@ -318,12 +320,33 @@ EXTERN void __tgt_target_nowait_query(void **AsyncHandle) {
            "this a target nowait region?\n");
   }
 
+  // Exponential backoff tries to optimally decide if a thread should just query
+  // for the device operations (work/spin wait on them) or block until they are
+  // completed (use device side blocking mechanism). This allows the runtime to
+  // adapt itself when there are a lot of long-running target regions in-flight.
+  using namespace llvm::omp::target;
+  static thread_local ExponentialBackoff QueryCounter(
+      Int64Envar("OMPTARGET_QUERY_COUNT_MAX", 10),
+      Int64Envar("OMPTARGET_QUERY_COUNT_THRESHOLD", 5),
+      Envar<float>("OMPTARGET_QUERY_COUNT_BACKOFF_FACTOR", 0.5f));
+
   auto *AsyncInfo = (AsyncInfoTy *)*AsyncHandle;
 
-  // If the are device operations still pending, return immediately without
-  // deallocating the handle.
-  if (!AsyncInfo->isDone())
+  // If the thread is actively waiting on too many target nowait regions, we
+  // should use the blocking sync type.
+  if (QueryCounter.isAboveThreshold())
+    AsyncInfo->SyncType = AsyncInfoTy::SyncTy::BLOCKING;
+
+  // If there are device operations still pending, return immediately without
+  // deallocating the handle and increase the current thread query count.
+  if (!AsyncInfo->isDone()) {
+    QueryCounter.increment();
     return;
+  }
+
+  // When a thread successfully completes a target nowait region, we
+  // exponentially backoff its query counter by the query factor.
+  QueryCounter.decrement();
 
   // Delete the handle and unset it from the OpenMP task data.
   delete AsyncInfo;

@@ -194,6 +194,7 @@ printKernelArguments(const ident_t *Loc, const int64_t DeviceId,
   }
 }
 
+// Wrapper for task stored async info objects.
 class TaskAsyncInfoWrapperTy {
   const int ExecThreadID = KMP_GTID_DNE;
   AsyncInfoTy LocalAsyncInfo;
@@ -254,6 +255,35 @@ public:
   }
 
   operator AsyncInfoTy &() { return *AsyncInfo; }
+};
+
+// Implement exponential backoff counting.
+// Linearly increments until given maximum, exponentially decrements based on
+// given backoff factor.
+class ExponentialBackoff {
+  int64_t Count = 0;
+  const int64_t MaxCount = 0;
+  const int64_t CountThreshold = 0;
+  const float BackoffFactor = 0.0f;
+
+public:
+  ExponentialBackoff(int64_t MaxCount, int64_t CountThreshold,
+                     float BackoffFactor)
+      : MaxCount(MaxCount), CountThreshold(CountThreshold),
+        BackoffFactor(BackoffFactor) {
+    assert(MaxCount >= 0 &&
+           "ExponentialBackoff: maximum count value should be non-negative");
+    assert(CountThreshold >= 0 &&
+           "ExponentialBackoff: count threshold value should be non-negative");
+    assert(BackoffFactor >= 0 && BackoffFactor < 1 &&
+           "ExponentialBackoff: backoff factor should be in [0, 1) interval");
+  }
+
+  void increment() { Count = std::min(Count + 1, MaxCount); }
+
+  void decrement() { Count *= BackoffFactor; }
+
+  bool isAboveThreshold() const { return Count > CountThreshold; }
 };
 
 #include "llvm/Support/TimeProfiler.h"

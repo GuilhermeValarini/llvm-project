@@ -202,10 +202,10 @@ private:
   __tgt_async_info AsyncInfo;
   DeviceTy &Device;
 
+public:
   /// Synchronization method to be used.
   SyncTy SyncType;
 
-public:
   AsyncInfoTy(DeviceTy &Device, SyncTy SyncType = SyncTy::BLOCKING)
       : Device(Device), SyncType(SyncType) {}
   ~AsyncInfoTy() { synchronize(); }
