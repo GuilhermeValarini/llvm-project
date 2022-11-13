@@ -20,7 +20,7 @@ elseif(NOT LIBOMPTARGET_DEP_MPI_FOUND)
   return()
 endif()
 
-libomptarget_say("Building MPI offloading plugin.")
+libomptarget_say("Building MPI NextGen offloading plugin.")
 
 # Source defines.
 # ==============================================================================
@@ -30,7 +30,7 @@ add_definitions("-DTARGET_ELF_ID=62")
 add_definitions(-DTARGET_NAME="MPI")
 add_definitions(-DDEBUG_PREFIX="TARGET MPI RTL")
 
-add_llvm_library(omptarget.rtl.mpi SHARED
+add_llvm_library(omptarget.rtl.mpi.nextgen SHARED
   src/EventSystem.cpp
   src/MPIManager.cpp
   src/rtl.cpp
@@ -44,6 +44,7 @@ add_llvm_library(omptarget.rtl.mpi SHARED
   PRIVATE
   elf_common
   MemoryManager
+  PluginInterface
   ${OPENMP_PTHREAD_LIB}
   ${LIBOMPTARGET_DEP_MPI_LIBRARIES}
   ${LIBOMPTARGET_DEP_LIBFFI_LIBRARIES}
@@ -54,22 +55,22 @@ add_llvm_library(omptarget.rtl.mpi SHARED
 )
 
 # Add include directories
-target_include_directories(omptarget.rtl.mpi
+target_include_directories(omptarget.rtl.mpi.nextgen
   PRIVATE ${LIBOMPTARGET_INCLUDE_DIR}
 )
 
 # Install plugin under the lib destination folder.
-install(TARGETS omptarget.rtl.mpi LIBRARY DESTINATION "${OPENMP_INSTALL_LIBDIR}")
-set_target_properties(omptarget.rtl.mpi PROPERTIES 
+install(TARGETS omptarget.rtl.mpi.nextgen LIBRARY DESTINATION "${OPENMP_INSTALL_LIBDIR}")
+set_target_properties(omptarget.rtl.mpi.nextgen PROPERTIES 
   INSTALL_RPATH "$ORIGIN" BUILD_RPATH "$ORIGIN:${CMAKE_CURRENT_BINARY_DIR}/..")
 
 if(LIBOMPTARGET_DEP_MPI_COMPILE_FLAGS)
-  set_target_properties(omptarget.rtl.mpi PROPERTIES
+  set_target_properties(omptarget.rtl.mpi.nextgen PROPERTIES
                         COMPILE_FLAGS "${LIBOMPTARGET_DEP_MPI_COMPILE_FLAGS}")
 endif()
 
 # Set C++20 as the target standard for this plugin.
-set_target_properties(omptarget.rtl.mpi
+set_target_properties(omptarget.rtl.mpi.nextgen
                       PROPERTIES
                       CXX_STANDARD 20
                       CXX_STANDARD_REQUIRED ON)
