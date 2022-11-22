@@ -227,10 +227,10 @@ EventTy retrieve(MPIRequestManagerTy RequestManager, void *OrgBuffer,
   co_return (co_await RequestManager);
 }
 
-EventTy exchange(MPIRequestManagerTy RequestManager, int DstRank,
-                 void *OrgBuffer, void *DstBuffer, int64_t Size) {
-  RequestManager.send(&DstRank, 1, MPI_INT);
+EventTy exchange(MPIRequestManagerTy RequestManager, void *OrgBuffer,
+                 int DstRank, void *DstBuffer, int64_t Size) {
   RequestManager.send(&OrgBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.send(&DstRank, 1, MPI_INT);
   RequestManager.send(&DstBuffer, sizeof(void *), MPI_BYTE);
   RequestManager.send(&Size, 1, MPI_INT64_T);
 
@@ -358,8 +358,8 @@ EventTy exchange(MPIRequestManagerTy RequestManager,
   void *OrgBuffer = nullptr;
   void *DstBuffer = nullptr;
   int64_t Size = 0;
-  RequestManager.receive(&DstRank, 1, MPI_INT);
   RequestManager.receive(&OrgBuffer, sizeof(void *), MPI_BYTE);
+  RequestManager.receive(&DstRank, 1, MPI_INT);
   RequestManager.receive(&DstBuffer, sizeof(void *), MPI_BYTE);
   RequestManager.receive(&Size, 1, MPI_INT64_T);
 

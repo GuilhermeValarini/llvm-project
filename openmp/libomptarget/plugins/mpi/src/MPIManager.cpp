@@ -407,7 +407,7 @@ int32_t MPIManagerTy::dataExchange(int32_t SrcID, void *SrcPtr, int32_t DstId,
     return OFFLOAD_FAIL;
 
   auto Event =
-      EventSystem.createEvent(exchange, SrcID, DstId + 1, SrcPtr, DstPtr, Size);
+      EventSystem.createEvent(exchange, SrcID, SrcPtr, DstId + 1, DstPtr, Size);
   pushNewEvent(Event, AsyncInfo);
 
   return OFFLOAD_SUCCESS;

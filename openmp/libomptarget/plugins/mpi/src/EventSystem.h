@@ -225,8 +225,8 @@ EventTy submit(MPIRequestManagerTy RequestManager, void *OrgBuffer,
                void *DstBuffer, int64_t Size);
 EventTy retrieve(MPIRequestManagerTy RequestManager, void *OrgBuffer,
                  void *DstBuffer, int64_t Size);
-EventTy exchange(MPIRequestManagerTy RequestManager, int DstRank,
-                 void *OrgBuffer, void *DstBuffer, int64_t Size);
+EventTy exchange(MPIRequestManagerTy RequestManager, void *OrgBuffer,
+                 int DstRank, void *DstBuffer, int64_t Size);
 EventTy execute(MPIRequestManagerTy RequestManager,
                 llvm::SmallVector<void *> Args, uint32_t TargetEntryIdx);
 EventTy sync(EventPtr Event);
