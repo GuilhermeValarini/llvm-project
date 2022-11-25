@@ -58,15 +58,17 @@ bool AsyncInfoTy::isDone() {
 }
 
 int32_t AsyncInfoTy::runPostProcessing() {
-  // Clear the post processing functions and ready the struct vector to receive
-  // new procedures from the post processing functions themselves.
-  SmallVector<PostProcFuncTy> Functions(std::move(PostProcessingFunctions));
-
-  for (auto &Func : Functions) {
-    const int Result = Func();
+  size_t Size = PostProcessingFunctions.size();
+  for (size_t I = 0; I < Size; ++I) {
+    const int Result = PostProcessingFunctions[I]();
     if (Result != OFFLOAD_SUCCESS)
       return Result;
   }
+
+  // Clear the vector up until the last known function, since post-processing
+  // procedures might add new procedures themselves.
+  const auto PrevBegin = PostProcessingFunctions.begin();
+  PostProcessingFunctions.erase(PrevBegin, PrevBegin + Size);
 
   return OFFLOAD_SUCCESS;
 }
