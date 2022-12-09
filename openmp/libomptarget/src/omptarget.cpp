@@ -975,6 +975,8 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
   }
 
   // Add post-processing functions
+  // TODO: We might want to remove `mutable` in the future by not changing the
+  // captured variables somehow.
   AsyncInfo.addPostProcessingFunction(
       [=, Device = &Device,
        PostProcessingPtrs = std::move(PostProcessingPtrs)]() mutable -> int {
@@ -1527,6 +1529,8 @@ static int processDataAfter(ident_t *Loc, int64_t DeviceId, void *HostPtr,
   }
 
   // Free target memory for private arguments after synchronization.
+  // TODO: We might want to remove `mutable` in the future by not changing the
+  // captured variables somehow.
   AsyncInfo.addPostProcessingFunction(
       [PrivateArgumentManager =
            std::move(PrivateArgumentManager)]() mutable -> int {
