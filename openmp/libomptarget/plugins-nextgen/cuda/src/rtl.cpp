@@ -498,7 +498,7 @@ struct CUDADeviceTy : public GenericDeviceTy {
     // Once the stream is synchronized and the operations completed (or an error
     // occurs), return it to stream pool and reset AsyncInfo. This is to make
     // sure the synchronization only works for its own tasks.
-    CUDAStreamManager.returnStream(Stream);
+    CUDAStreamManager.returnResource(Stream);
     AsyncInfo.Queue = nullptr;
 
     return Plugin::check(Res, "Error in cuStreamQuery: %s");
