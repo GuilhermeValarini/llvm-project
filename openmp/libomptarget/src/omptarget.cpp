@@ -680,10 +680,9 @@ struct PostProcessingInfo {
   /// The target pointer information.
   TargetPointerResultTy TPR;
 
-  PostProcessingInfo(void *HstPtr, int64_t Size, int64_t ArgType, bool DelEntry,
-                     TargetPointerResultTy &&TPR)
-      : HstPtrBegin(HstPtr), DataSize(Size), ArgType(ArgType),
-        TPR(std::move(TPR)) {}
+  PostProcessingInfo(void *HstPtr, int64_t Size, int64_t ArgType,
+                     TargetPointerResultTy TPR)
+      : HstPtrBegin(HstPtr), DataSize(Size), ArgType(ArgType), TPR(TPR) {}
 };
 
 /// Apply \p CB to the shadow map pointer entries in the range \p Begin, to
@@ -744,7 +743,7 @@ postProcessingTargetDataEnd(DeviceTy *Device,
     bool DelEntry = true;
     if (Info.TPR.Flags.IsHostPointer ||
         Info.TPR.Entry->getTotalRefCount() != 0 ||
-        Info.TPR.Entry->getDeleterThreadCount() != 1) {
+        Info.TPR.Entry->decDeleterThreadCount() != 1) {
       HDTTMap.destroy();
       DelEntry = false;
     }
@@ -861,12 +860,11 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
     bool ForceDelete = ArgTypes[I] & OMP_TGT_MAPTYPE_DELETE;
     bool HasPresentModifier = ArgTypes[I] & OMP_TGT_MAPTYPE_PRESENT;
     bool HasHoldModifier = ArgTypes[I] & OMP_TGT_MAPTYPE_OMPX_HOLD;
-    const bool FromDataEnd = true;
 
     // If PTR_AND_OBJ, HstPtrBegin is address of pointee
     TargetPointerResultTy TPR = Device.getTgtPtrBegin(
         HstPtrBegin, DataSize, IsLast, UpdateRef, HasHoldModifier, IsHostPtr,
-        !IsImplicit, ForceDelete, FromDataEnd);
+        !IsImplicit, ForceDelete);
     void *TgtPtrBegin = TPR.TargetPointer;
     if (!TPR.isPresent() && !TPR.isHostPointer() &&
         (DataSize || HasPresentModifier)) {
@@ -959,8 +957,7 @@ int targetDataEnd(ident_t *Loc, DeviceTy &Device, int32_t ArgNum,
       }
 
       // Add pointer to the buffer for post-synchronize processing.
-      PostProcessingPtrs.emplace_back(HstPtrBegin, DataSize, ArgTypes[I],
-                                      DelEntry && !IsHostPtr, std::move(TPR));
+      PostProcessingPtrs.emplace_back(HstPtrBegin, DataSize, ArgTypes[I], TPR);
     }
   }
 

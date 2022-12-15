@@ -13,7 +13,6 @@
 #ifndef _OMPTARGET_DEVICE_H
 #define _OMPTARGET_DEVICE_H
 
-#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
@@ -43,37 +42,6 @@ enum kmp_target_offload_kind {
   tgt_mandatory = 2
 };
 typedef enum kmp_target_offload_kind kmp_target_offload_kind_t;
-
-struct ScopedAtomicCounter {
-private:
-  std::atomic<int> *Counter = nullptr;
-
-public:
-  ScopedAtomicCounter() = default;
-
-  ScopedAtomicCounter(std::atomic<int> &C) : Counter(&C) {
-    if (Counter) {
-      (*Counter)++;
-      assert(*Counter > 0);
-    }
-  }
-
-  ~ScopedAtomicCounter() {
-    if (Counter) {
-      (*Counter)--;
-      assert(*Counter >= 0);
-    }
-  }
-
-  ScopedAtomicCounter(ScopedAtomicCounter &&Other) : Counter(Other.Counter) {
-    Other.Counter = nullptr;
-  }
-  ScopedAtomicCounter &operator=(ScopedAtomicCounter &&Other) {
-    Counter = Other.Counter;
-    Other.Counter = nullptr;
-    return *this;
-  }
-};
 
 /// Map between host data and target data.
 struct HostDataToTargetTy {
@@ -134,7 +102,7 @@ private:
     void *Event = nullptr;
 
     /// TODO: Describe it!
-    std::atomic<int> DeleterThreadCount;
+    int DeleterThreadCount;
   };
   // When HostDataToTargetTy is used by std::set, std::set::iterator is const
   // use unique_ptr to make States mutable.
@@ -176,13 +144,13 @@ public:
   int addEventIfNecessary(DeviceTy &Device, AsyncInfoTy &AsyncInfo) const;
 
   /// TODO: Describe it!
-  int getDeleterThreadCount() {
-    return States->DeleterThreadCount;
+  void incDeleterThreadCount() {
+    ++States->DeleterThreadCount;
   }
 
   /// TODO: Describe it!
-  ScopedAtomicCounter getScopedDeleterThreadCounter() {
-    return ScopedAtomicCounter(States->DeleterThreadCount);
+  int decDeleterThreadCount() {
+    return --States->DeleterThreadCount;
   }
 
   /// Set the event bound to this data map.
@@ -323,9 +291,6 @@ struct TargetPointerResultTy {
 
   /// The corresponding target pointer
   void *TargetPointer = nullptr;
-
-  /// TODO: Describe it!
-  ScopedAtomicCounter ThreadDeleteCounter = {};
 };
 
 /// Map for shadow pointers
@@ -413,8 +378,7 @@ struct DeviceTy {
                                        bool &IsLast, bool UpdateRefCount,
                                        bool UseHoldRefCount, bool &IsHostPtr,
                                        bool MustContain = false,
-                                       bool ForceDelete = false,
-                                       bool FromDataEnd = false);
+                                       bool ForceDelete = false);
 
   /// TODO: Update it!
   /// Deallocate \p LR and remove the entry. Assume the total reference count is

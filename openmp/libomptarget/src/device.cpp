@@ -365,11 +365,9 @@ TargetPointerResultTy DeviceTy::getTargetPointer(
 TargetPointerResultTy
 DeviceTy::getTgtPtrBegin(void *HstPtrBegin, int64_t Size, bool &IsLast,
                          bool UpdateRefCount, bool UseHoldRefCount,
-                         bool &IsHostPtr, bool MustContain, bool ForceDelete,
-                         bool FromDataEnd) {
+                         bool &IsHostPtr, bool MustContain, bool ForceDelete) {
   HDTTMapAccessorTy HDTTMap = HostDataToTargetMap.getExclusiveAccessor();
 
-  ScopedAtomicCounter DeleterScopedCounter;
   void *TargetPointer = NULL;
   bool IsNew = false;
   bool IsPresent = true;
@@ -388,14 +386,11 @@ DeviceTy::getTgtPtrBegin(void *HstPtrBegin, int64_t Size, bool &IsLast,
              "expected correct IsLast prediction for reset");
     }
 
-    if (FromDataEnd) {
-      DeleterScopedCounter = LR.Entry->getScopedDeleterThreadCounter();
-    }
-
     const char *RefCountAction;
     if (!UpdateRefCount) {
       RefCountAction = " (update suppressed)";
     } else if (IsLast) {
+      HT.incDeleterThreadCount();
       HT.decRefCount(UseHoldRefCount);
       assert(HT.getTotalRefCount() == 0 &&
              "Expected zero reference count when deletion is scheduled");
@@ -434,7 +429,7 @@ DeviceTy::getTgtPtrBegin(void *HstPtrBegin, int64_t Size, bool &IsLast,
     TargetPointer = HstPtrBegin;
   }
 
-  return {{IsNew, IsHostPtr, IsPresent}, LR.Entry, TargetPointer, std::move(DeleterScopedCounter)};
+  return {{IsNew, IsHostPtr, IsPresent}, LR.Entry, TargetPointer};
 }
 
 // Return the target pointer begin (where the data will be moved).
@@ -451,18 +446,21 @@ void *DeviceTy::getTgtPtrBegin(HDTTMapAccessorTy &HDTTMap, void *HstPtrBegin,
   return NULL;
 }
 
-void DeviceTy::eraseMapEntry(HDTTMapAccessorTy &HDTTMap, HostDataToTargetTy *Entry, int64_t Size) {
+void DeviceTy::eraseMapEntry(HDTTMapAccessorTy &HDTTMap,
+                             HostDataToTargetTy *Entry, int64_t Size) {
   assert(Entry && "Trying to delete a null entry from the HDTT map.");
 
   // Verify this thread is the only deleter holding a reference to the entry.
-  assert(Entry->getTotalRefCount() == 0 && Entry->getDeleterThreadCount() == 1 &&
+  assert(Entry->getTotalRefCount() == 0 &&
+         Entry->decDeleterThreadCount() == -1 &&
          "Trying to delete entry that is in use or owned by another thread.");
 
   INFO(OMP_INFOTYPE_MAPPING_CHANGED, DeviceID,
        "Removing map entry with HstPtrBegin=" DPxMOD ", TgtPtrBegin=" DPxMOD
        ", Size=%" PRId64 ", Name=%s\n",
        DPxPTR(Entry->HstPtrBegin), DPxPTR(Entry->TgtPtrBegin), Size,
-       (Entry->HstPtrName) ? getNameFromMapping(Entry->HstPtrName).c_str() : "unknown");
+       (Entry->HstPtrName) ? getNameFromMapping(Entry->HstPtrName).c_str()
+                           : "unknown");
 
   HDTTMap->erase(Entry);
 }
@@ -472,13 +470,13 @@ int DeviceTy::deallocTgtPtrAndEntry(HostDataToTargetTy *Entry, int64_t Size) {
 
   DP("Deleting tgt data " DPxMOD " of size %" PRId64 "\n",
      DPxPTR(Entry->TgtPtrBegin), Size);
-  
+
   void *Event = Entry->getEvent();
   if (Event && destroyEvent(Event) != OFFLOAD_SUCCESS) {
     REPORT("Failed to destroy event " DPxMOD "\n", DPxPTR(Event));
     return OFFLOAD_FAIL;
   }
-  
+
   int Ret = deleteData((void *)Entry->TgtPtrBegin);
   delete Entry;
 
